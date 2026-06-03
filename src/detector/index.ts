@@ -35,17 +35,25 @@ const WORDLIST: WordDef[] = [
   { word: "fucking", severity: "strong", group: "fuck" },
   { word: "fucked", severity: "strong", group: "fuck" },
   { word: "fucker", severity: "strong", group: "fuck" },
+  { word: "fuckers", severity: "strong", group: "fuck" },
   { word: "fuckin", severity: "strong", group: "fuck" },
   { word: "fucks", severity: "strong", group: "fuck" },
+  { word: "fuckery", severity: "strong", group: "fuck" },
   // Compound words
   { word: "motherfucker", severity: "strong", group: "fuck" },
   { word: "motherfucking", severity: "strong", group: "fuck" },
   { word: "mothafucka", severity: "strong", group: "fuck" },
+  { word: "muthafucka", severity: "strong", group: "fuck" },
+  { word: "muthafucker", severity: "strong", group: "fuck" },
+  { word: "muthafucking", severity: "strong", group: "fuck" },
   { word: "fuckup", severity: "strong", group: "fuck" },
   { word: "fuckoff", severity: "strong", group: "fuck" },
+  { word: "fuckedup", severity: "strong", group: "fuck" },
   { word: "clusterfuck", severity: "strong", group: "fuck" },
   { word: "fuckwit", severity: "strong", group: "fuck" },
   { word: "fucktard", severity: "strong", group: "fuck" },
+  { word: "fuckwad", severity: "strong", group: "fuck" },
+  { word: "fuckwads", severity: "strong", group: "fuck" },
   { word: "fuckface", severity: "strong", group: "fuck" },
   { word: "fuckhead", severity: "strong", group: "fuck" },
   { word: "fucksake", severity: "strong", group: "fuck" },
@@ -71,11 +79,20 @@ const WORDLIST: WordDef[] = [
   { word: "shitting", severity: "strong", group: "shit" },
   { word: "shits", severity: "strong", group: "shit" },
   { word: "shitted", severity: "strong", group: "shit" },
+  { word: "shat", severity: "strong", group: "shit" },
   // Compound words
   { word: "bullshit", severity: "strong", group: "shit" },
   { word: "horseshit", severity: "strong", group: "shit" },
   { word: "dipshit", severity: "strong", group: "shit" },
   { word: "shitshow", severity: "strong", group: "shit" },
+  { word: "shitstorm", severity: "strong", group: "shit" },
+  { word: "shitstorms", severity: "strong", group: "shit" },
+  { word: "shitload", severity: "strong", group: "shit" },
+  { word: "shitloads", severity: "strong", group: "shit" },
+  { word: "shitpost", severity: "strong", group: "shit" },
+  { word: "shitposts", severity: "strong", group: "shit" },
+  { word: "shitposting", severity: "strong", group: "shit" },
+  { word: "shitlord", severity: "strong", group: "shit" },
   { word: "shithead", severity: "strong", group: "shit" },
   { word: "shithole", severity: "strong", group: "shit" },
   { word: "shitface", severity: "strong", group: "shit" },
@@ -100,8 +117,13 @@ const WORDLIST: WordDef[] = [
   { word: "jackass", severity: "strong", group: "ass" },
   { word: "dumbass", severity: "strong", group: "ass" },
   { word: "fatass", severity: "moderate", group: "ass" },
+  { word: "smartass", severity: "moderate", group: "ass" },
+  { word: "smartasses", severity: "moderate", group: "ass" },
   { word: "asshat", severity: "strong", group: "ass" },
   { word: "asswipe", severity: "strong", group: "ass" },
+  { word: "assclown", severity: "strong", group: "ass" },
+  { word: "assbag", severity: "strong", group: "ass" },
+  { word: "assface", severity: "strong", group: "ass" },
   { word: "badass", severity: "mild", group: "ass" },
 
   // === DAMN family (moderate) ===
@@ -109,7 +131,9 @@ const WORDLIST: WordDef[] = [
   { word: "damned", severity: "moderate", group: "damn" },
   { word: "damnit", severity: "moderate", group: "damn" },
   { word: "dammit", severity: "moderate", group: "damn" },
+  { word: "goddam", severity: "moderate", group: "damn" },
   { word: "goddamn", severity: "moderate", group: "damn" },
+  { word: "goddamned", severity: "moderate", group: "damn" },
   { word: "goddamnit", severity: "moderate", group: "damn" },
   { word: "goddammit", severity: "moderate", group: "damn" },
 
@@ -119,6 +143,11 @@ const WORDLIST: WordDef[] = [
   { word: "bitching", severity: "strong", group: "bitch" },
   { word: "bitchy", severity: "strong", group: "bitch" },
   { word: "bitchass", severity: "strong", group: "bitch" },
+  { word: "sonofabitch", severity: "strong", group: "bitch" },
+  { word: "bitchslap", severity: "strong", group: "bitch" },
+  { word: "bitchslapped", severity: "strong", group: "bitch" },
+  { word: "bitchslapping", severity: "strong", group: "bitch" },
+  { word: "bitchfest", severity: "strong", group: "bitch" },
 
   // === BASTARD (strong) ===
   { word: "bastard", severity: "strong", group: "bastard" },
@@ -129,15 +158,57 @@ const WORDLIST: WordDef[] = [
   { word: "pissed", severity: "moderate", group: "piss" },
   { word: "pissing", severity: "moderate", group: "piss" },
   { word: "pissoff", severity: "moderate", group: "piss" },
+  { word: "pisspoor", severity: "moderate", group: "piss" },
+  { word: "pissant", severity: "moderate", group: "piss" },
 
   // === DICK (moderate) ===
   { word: "dick", severity: "moderate", group: "dick" },
+  { word: "dicks", severity: "moderate", group: "dick" },
   { word: "dickhead", severity: "strong", group: "dick" },
+  { word: "dickheads", severity: "strong", group: "dick" },
+  { word: "dickwad", severity: "strong", group: "dick" },
+  { word: "dickwads", severity: "strong", group: "dick" },
+  { word: "dickweed", severity: "strong", group: "dick" },
+  { word: "dickweeds", severity: "strong", group: "dick" },
+
+  // === DOUCHE (moderate) ===
+  { word: "douche", severity: "moderate", group: "douche" },
+  { word: "douches", severity: "moderate", group: "douche" },
+  { word: "douchebag", severity: "strong", group: "douche" },
+  { word: "douchebags", severity: "strong", group: "douche" },
+
+  // === PRICK (moderate) ===
+  { word: "prick", severity: "moderate", group: "prick" },
+  { word: "pricks", severity: "moderate", group: "prick" },
+
+  // === WANKER (moderate) ===
+  { word: "wanker", severity: "moderate", group: "wanker" },
+  { word: "wankers", severity: "moderate", group: "wanker" },
+  { word: "wank", severity: "moderate", group: "wanker" },
+  { word: "wanking", severity: "moderate", group: "wanker" },
+
+  // === TWAT (strong) ===
+  { word: "twat", severity: "strong", group: "twat" },
+  { word: "twats", severity: "strong", group: "twat" },
+
+  // === BOLLOCKS (moderate) ===
+  { word: "bollocks", severity: "moderate", group: "bollocks" },
+  { word: "bollock", severity: "moderate", group: "bollocks" },
+  { word: "bollocked", severity: "moderate", group: "bollocks" },
+
+  // === BUGGER (moderate) ===
+  { word: "bugger", severity: "moderate", group: "bugger" },
+  { word: "buggered", severity: "moderate", group: "bugger" },
+  { word: "buggering", severity: "moderate", group: "bugger" },
 
   // === CRAP (moderate) ===
   { word: "crap", severity: "moderate", group: "crap" },
+  { word: "craps", severity: "moderate", group: "crap" },
+  { word: "crapped", severity: "moderate", group: "crap" },
   { word: "crappy", severity: "moderate", group: "crap" },
   { word: "crapping", severity: "moderate", group: "crap" },
+  { word: "crapfest", severity: "moderate", group: "crap" },
+  { word: "crapshow", severity: "moderate", group: "crap" },
 
   // === HELL (mild) ===
   { word: "hell", severity: "mild", group: "hell" },
@@ -145,6 +216,7 @@ const WORDLIST: WordDef[] = [
   // === Abbreviations (strong) ===
   { word: "mf", severity: "strong", group: "fuck" },
   { word: "fu", severity: "strong", group: "fuck" },
+  { word: "mofo", severity: "strong", group: "fuck" },
 
   // === Abbreviations (mild) ===
   { word: "ffs", severity: "mild", group: "fuck" },
@@ -530,7 +602,12 @@ export function createDetector(extraWords?: WordDef[]): (text: string) => Detect
         continue;
       }
       seen.add(match.index);
-      matches.push({ word, index: match.index, severity: entry.severity, group: entry.group });
+      matches.push({
+        word,
+        index: match.index,
+        severity: entry.severity,
+        group: entry.group,
+      });
     }
 
     const collapsed = collapseRepeats(lower);
@@ -546,7 +623,12 @@ export function createDetector(extraWords?: WordDef[]): (text: string) => Detect
           continue;
         }
         seen.add(match.index);
-        matches.push({ word, index: match.index, severity: entry.severity, group: entry.group });
+        matches.push({
+          word,
+          index: match.index,
+          severity: entry.severity,
+          group: entry.group,
+        });
       }
     }
 
