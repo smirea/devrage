@@ -3,6 +3,7 @@ import { claudeAdapter } from "./claude";
 import { clineAdapter } from "./cline";
 import { codexAdapter } from "./codex";
 import { cursorAdapter } from "./cursor";
+import { grokAdapter } from "./grok";
 import { opencodeAdapter } from "./opencode";
 import { piAdapter } from "./pi";
 import { t3codeAdapter } from "./t3code";
@@ -102,6 +103,7 @@ const ADAPTERS: Record<string, () => Adapter> = {
   claude: claudeAdapter,
   codex: codexAdapter,
   cursor: cursorAdapter,
+  grok: grokAdapter,
   opencode: opencodeAdapter,
   amp: ampAdapter,
   cline: clineAdapter,
