@@ -50,6 +50,28 @@ const COST_SPINNER_MESSAGES = [
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HISTOGRAM_HEIGHT = 10;
+const HISTOGRAM_INDENT = "    ";
+const DEFAULT_TERMINAL_WIDTH = 80;
+const YEAR_GRID_DAYS = 365;
+const YEAR_GRID_ROWS = 7;
+const YEAR_GRID_DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const YEAR_GRID_DAY_LABEL_WIDTH = 3;
+const MONTH_LABELS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+const RAGE_COLORS = ["\x1b[38;5;52m", "\x1b[38;5;88m", "\x1b[38;5;160m", "\x1b[38;5;196m"];
 
 function createSpinner(messages = SPINNER_MESSAGES) {
   let messageIdx = 0;
@@ -141,6 +163,43 @@ interface CostReportData {
   pricedRequests: number;
   unpricedRequests: number;
   agents: CostReportAgent[];
+}
+
+interface HistogramData {
+  buckets: HistogramBucket[];
+  barPositions: number[];
+  chartWidth: number;
+  xLabels: HistogramLabel[];
+  totalBuckets: number;
+  visibleBuckets: number;
+  max: number;
+  unit: string;
+}
+
+interface HistogramBucket {
+  messages: number;
+  rageMessages: number;
+}
+
+interface HistogramLabel {
+  label: string;
+  position: number;
+}
+
+interface DayStats {
+  messages: number;
+  rageMessages: number;
+  swears: number;
+}
+
+interface YearGridData {
+  rows: string[];
+  monthLabels: string;
+  visibleDays: number;
+  totalDays: number;
+  startLabel: string;
+  endLabel: string;
+  maxSwears: number;
 }
 
 function parseArgs(args: string[]): ScanOptions {
@@ -276,6 +335,7 @@ export async function scan(args: string[]): Promise<void> {
 
   const groupTally: Record<string, number> = {};
   const variantTally: Record<string, Record<string, number>> = {};
+  const dayStats = new Map<string, DayStats>();
 
   let totalMessages = 0;
   let totalSwears = 0;
@@ -291,6 +351,7 @@ export async function scan(args: string[]): Promise<void> {
       agentMessages++;
 
       const result = detect(message.text);
+      addDayStats(message.timestamp, result.count, dayStats);
       if (result.count > 0) {
         totalSwears += result.count;
         agentSwears += result.count;
@@ -345,6 +406,8 @@ export async function scan(args: string[]): Promise<void> {
         `    ${c.yellow}${group.padEnd(12)}${c.reset} ${c.bold}${String(count).padStart(4)}${c.reset}${suffix}`,
       );
     }
+
+    printTimeCharts(dayStats);
   }
 
   console.log("");
@@ -352,6 +415,481 @@ export async function scan(args: string[]): Promise<void> {
     console.log(`  ${c.green}squeaky clean! not a single swear found.${c.reset}`);
     console.log("");
   }
+}
+
+function addDayStats(
+  timestamp: string | undefined,
+  swearCount: number,
+  dayStats: Map<string, DayStats>,
+): void {
+  const date = parseTimestamp(timestamp);
+  if (!date) {
+    return;
+  }
+
+  const day = dayKey(date);
+  const stats = dayStats.get(day) ?? {
+    messages: 0,
+    rageMessages: 0,
+    swears: 0,
+  };
+  stats.messages++;
+
+  if (swearCount > 0) {
+    stats.rageMessages++;
+    stats.swears += swearCount;
+  }
+
+  dayStats.set(day, stats);
+}
+
+function printTimeCharts(dayStats: Map<string, DayStats>): void {
+  const width = terminalWidth();
+  const day = buildDayHistogram(dayStats, width);
+  const year = buildYearGrid(dayStats, width);
+
+  if (day) {
+    printHistogram("by day", day);
+  }
+
+  if (year) {
+    printYearGrid(year);
+  }
+}
+
+function printHistogram(title: string, histogram: HistogramData): void {
+  const bucketLabel =
+    histogram.totalBuckets > histogram.visibleBuckets
+      ? `last ${histogram.visibleBuckets} of ${histogram.totalBuckets} ${pluralize(histogram.unit, histogram.totalBuckets)}`
+      : `${histogram.visibleBuckets} ${pluralize(histogram.unit, histogram.visibleBuckets)}`;
+  const yAxisWidth = yAxisLabelWidth(histogram.max);
+
+  console.log("");
+  console.log(`  ${sectionTitle(title)}`);
+  for (let row = 0; row < HISTOGRAM_HEIGHT; row++) {
+    const yLabel = yAxisLabel(row, histogram.max).padStart(yAxisWidth);
+    const bars = histogramRow(histogram, row);
+    console.log(`${HISTOGRAM_INDENT}${c.dim}${yLabel}${c.reset} ${c.dim}│${c.reset}${bars}`);
+  }
+  console.log(
+    `${HISTOGRAM_INDENT}${c.dim}${"0".padStart(yAxisWidth)} └${"─".repeat(histogram.chartWidth)}${c.reset}`,
+  );
+  console.log(
+    `${HISTOGRAM_INDENT}${" ".repeat(yAxisWidth + 2)}${c.dim}${formatXAxisLabels(histogram.chartWidth, histogram.xLabels)}${c.reset}`,
+  );
+  console.log(
+    `${HISTOGRAM_INDENT}${c.dim}${bucketLabel}; max ${histogram.max} messages/${histogram.unit}; red rage, gray other${c.reset}`,
+  );
+}
+
+function buildDayHistogram(statsByDay: Map<string, DayStats>, width: number): HistogramData | null {
+  const keys = [...statsByDay.keys()].sort();
+  const firstKey = keys[0];
+  const lastKey = keys.at(-1);
+  if (!firstKey || !lastKey) {
+    return null;
+  }
+
+  const first = dateFromDayKey(firstKey);
+  const last = dateFromDayKey(lastKey);
+  const totalBuckets = daysBetween(first, last) + 1;
+  const max = Math.max(...[...statsByDay.values()].map((stats) => stats.messages));
+  const chartWidth = maxHistogramWidth(width, yAxisLabelWidth(max));
+  const visibleBuckets = Math.min(totalBuckets, chartWidth);
+  const start = totalBuckets > visibleBuckets ? addDays(last, -(visibleBuckets - 1)) : first;
+  const dates = Array.from({ length: visibleBuckets }, (_, index) => addDays(start, index));
+  const buckets = dates.map((date) => statsByDay.get(dayKey(date)) ?? emptyDayStats());
+  const labels = dates.map(formatShortDate);
+
+  return buildHistogramData(labels, buckets, totalBuckets, "day", chartWidth);
+}
+
+function buildHistogramData(
+  labels: string[],
+  buckets: HistogramBucket[],
+  totalBuckets: number,
+  unit: string,
+  maxWidth: number,
+): HistogramData {
+  const max = Math.max(...buckets.map((bucket) => bucket.messages));
+  const chartWidth = Math.min(maxWidth, Math.max(buckets.length, minimumLabelWidth(labels)));
+  const barPositions = spreadPositions(buckets.length, chartWidth);
+
+  return {
+    buckets,
+    barPositions,
+    chartWidth,
+    xLabels: xAxisLabels(labels, barPositions),
+    totalBuckets,
+    visibleBuckets: buckets.length,
+    max,
+    unit,
+  };
+}
+
+function histogramRow(histogram: HistogramData, row: number): string {
+  const cells = Array.from({ length: histogram.chartWidth }, () => " ");
+
+  for (let index = 0; index < histogram.buckets.length; index++) {
+    const bucket = histogram.buckets[index] ?? emptyDayStats();
+    const position = histogram.barPositions[index] ?? index;
+    cells[position] = histogramCell(bucket, histogram.max, row);
+  }
+
+  return cells.join("");
+}
+
+function histogramCell(bucket: HistogramBucket, max: number, row: number): string {
+  if (bucket.messages <= 0 || max <= 0) {
+    return " ";
+  }
+
+  const barHeight = Math.ceil((bucket.messages / max) * HISTOGRAM_HEIGHT);
+  const rageHeight = Math.ceil((bucket.rageMessages / max) * HISTOGRAM_HEIGHT);
+  const threshold = HISTOGRAM_HEIGHT - row;
+  if (barHeight < threshold) {
+    return " ";
+  }
+
+  return rageHeight >= threshold ? `${c.red}█${c.reset}` : `${c.gray}█${c.reset}`;
+}
+
+function buildYearGrid(statsByDay: Map<string, DayStats>, width: number): YearGridData | null {
+  if (statsByDay.size === 0) {
+    return null;
+  }
+
+  const today = startOfDay(new Date());
+  const fullStart = addDays(today, -(YEAR_GRID_DAYS - 1));
+  const alignedStart = startOfWeek(fullStart);
+  const totalColumns = Math.floor(daysBetween(alignedStart, today) / YEAR_GRID_ROWS) + 1;
+  const visibleColumns = Math.min(totalColumns, maxYearGridColumns(width));
+  const start = addDays(alignedStart, (totalColumns - visibleColumns) * YEAR_GRID_ROWS);
+  const firstVisibleDay = maxDate(start, fullStart);
+  const visibleDays = daysBetween(firstVisibleDay, today) + 1;
+  const maxSwears = maxVisibleSwears(statsByDay, firstVisibleDay, visibleDays);
+
+  const rows = Array.from({ length: YEAR_GRID_ROWS }, (_, row) => {
+    const cells = Array.from({ length: visibleColumns }, (_, column) => {
+      const date = addDays(start, column * YEAR_GRID_ROWS + row);
+      if (date < fullStart || date > today) {
+        return " ";
+      }
+
+      const stats = statsByDay.get(dayKey(date));
+      return yearGridCell(stats?.swears ?? 0, maxSwears);
+    });
+
+    return cells.join("");
+  });
+
+  return {
+    rows,
+    monthLabels: buildYearGridMonthLabels(start, visibleColumns, fullStart, today),
+    visibleDays,
+    totalDays: YEAR_GRID_DAYS,
+    startLabel: formatShortDate(firstVisibleDay),
+    endLabel: formatShortDate(today),
+    maxSwears,
+  };
+}
+
+function printYearGrid(grid: YearGridData): void {
+  const rangeLabel =
+    grid.visibleDays < grid.totalDays
+      ? `last ${grid.visibleDays} of ${grid.totalDays} days`
+      : `${grid.totalDays} days`;
+
+  console.log("");
+  console.log(`  ${sectionTitle("past year")}`);
+  console.log(
+    `${HISTOGRAM_INDENT}${" ".repeat(YEAR_GRID_DAY_LABEL_WIDTH + 1)}${c.dim}${grid.monthLabels}${c.reset}`,
+  );
+  for (let index = 0; index < grid.rows.length; index++) {
+    const dayLabel = YEAR_GRID_DAY_LABELS[index] ?? "";
+    console.log(
+      `${HISTOGRAM_INDENT}${c.dim}${dayLabel.padEnd(YEAR_GRID_DAY_LABEL_WIDTH)}${c.reset} ${grid.rows[index] ?? ""}`,
+    );
+  }
+  console.log(
+    `${HISTOGRAM_INDENT}${" ".repeat(YEAR_GRID_DAY_LABEL_WIDTH + 1)}${c.dim}${grid.startLabel} - ${grid.endLabel}; ${rangeLabel}; max ${grid.maxSwears} swears/day${c.reset}`,
+  );
+}
+
+function buildYearGridMonthLabels(
+  start: Date,
+  columns: number,
+  fullStart: Date,
+  today: Date,
+): string {
+  const chars = Array.from({ length: columns }, () => " ");
+  let previousMonth: number | null = null;
+
+  for (let column = 0; column < columns; column++) {
+    const firstDate = firstVisibleDateInWeek(
+      addDays(start, column * YEAR_GRID_ROWS),
+      fullStart,
+      today,
+    );
+    if (!firstDate) {
+      continue;
+    }
+
+    const month = firstDate.getMonth();
+    if (month === previousMonth) {
+      continue;
+    }
+    previousMonth = month;
+
+    const label = MONTH_LABELS[month] ?? "";
+    if (!label || column + label.length > columns) {
+      continue;
+    }
+
+    if (overlapsLabel(chars, column, label.length)) {
+      continue;
+    }
+
+    for (let index = 0; index < label.length; index++) {
+      chars[column + index] = label.charAt(index);
+    }
+  }
+
+  return chars.join("").trimEnd();
+}
+
+function firstVisibleDateInWeek(weekStart: Date, fullStart: Date, today: Date): Date | null {
+  for (let offset = 0; offset < YEAR_GRID_ROWS; offset++) {
+    const date = addDays(weekStart, offset);
+    if (date >= fullStart && date <= today) {
+      return date;
+    }
+  }
+
+  return null;
+}
+
+function maxVisibleSwears(
+  statsByDay: Map<string, DayStats>,
+  start: Date,
+  visibleDays: number,
+): number {
+  let max = 0;
+  for (let index = 0; index < visibleDays; index++) {
+    const stats = statsByDay.get(dayKey(addDays(start, index)));
+    max = Math.max(max, stats?.swears ?? 0);
+  }
+
+  return max;
+}
+
+function yearGridCell(swears: number, maxSwears: number): string {
+  if (swears <= 0 || maxSwears <= 0) {
+    return `${c.gray}■${c.reset}`;
+  }
+
+  const index = Math.ceil((swears / maxSwears) * RAGE_COLORS.length) - 1;
+  return `${RAGE_COLORS[index] ?? c.red}■${c.reset}`;
+}
+
+function maxYearGridColumns(width: number): number {
+  return Math.max(1, width - HISTOGRAM_INDENT.length - YEAR_GRID_DAY_LABEL_WIDTH - 1);
+}
+
+function maxHistogramWidth(width: number, yAxisWidth: number): number {
+  const reserved = HISTOGRAM_INDENT.length + yAxisWidth + 2;
+  return Math.max(1, width - reserved);
+}
+
+function yAxisLabel(row: number, max: number): string {
+  if (row === 0) {
+    return String(max);
+  }
+
+  const midpoint = Math.floor(HISTOGRAM_HEIGHT / 2);
+  if (row === midpoint) {
+    const value = Math.ceil(max / 2);
+    return value === max ? "" : String(value);
+  }
+
+  return "";
+}
+
+function yAxisLabelWidth(max: number): number {
+  return Math.max(1, String(max).length);
+}
+
+function xAxisLabels(labels: string[], positions: number[]): HistogramLabel[] {
+  if (labels.length === 0) {
+    return [];
+  }
+  if (labels.length === 1) {
+    return [{ label: labels[0]!, position: positions[0] ?? 0 }];
+  }
+
+  const lastIndex = labels.length - 1;
+  const result: HistogramLabel[] = [
+    { label: labels[0]!, position: positions[0] ?? 0 },
+    { label: labels[lastIndex]!, position: positions[lastIndex] ?? lastIndex },
+  ];
+
+  if (labels.length >= 15) {
+    const middleIndex = Math.floor(lastIndex / 2);
+    result.push({
+      label: labels[middleIndex]!,
+      position: positions[middleIndex] ?? middleIndex,
+    });
+  }
+
+  return result;
+}
+
+function spreadPositions(count: number, width: number): number[] {
+  if (count <= 0) {
+    return [];
+  }
+  if (count === 1) {
+    return [Math.floor(width / 2)];
+  }
+
+  return Array.from({ length: count }, (_, index) =>
+    Math.round((index * (width - 1)) / (count - 1)),
+  );
+}
+
+function minimumLabelWidth(labels: string[]): number {
+  if (labels.length === 0) {
+    return 1;
+  }
+  if (labels.length === 1) {
+    return labels[0]!.length;
+  }
+
+  const first = labels[0]!;
+  const last = labels[labels.length - 1]!;
+  if (labels.length < 15) {
+    return first.length + 1 + last.length;
+  }
+
+  const middle = labels[Math.floor((labels.length - 1) / 2)]!;
+  return first.length + middle.length + last.length + 2;
+}
+
+function formatXAxisLabels(width: number, labels: HistogramLabel[]): string {
+  const chars = Array.from({ length: width }, () => " ");
+  let placed = 0;
+
+  for (const label of labels) {
+    if (label.label.length > width) {
+      continue;
+    }
+
+    const start = Math.max(
+      0,
+      Math.min(width - label.label.length, label.position - Math.floor(label.label.length / 2)),
+    );
+    if (start < 0 || overlapsLabel(chars, start, label.label.length)) {
+      continue;
+    }
+
+    for (let index = 0; index < label.label.length; index++) {
+      chars[start + index] = label.label.charAt(index);
+    }
+    placed++;
+  }
+
+  if (placed < Math.min(2, labels.length)) {
+    return labels.map((label) => label.label).join(" ");
+  }
+
+  return chars.join("").trimEnd();
+}
+
+function overlapsLabel(chars: string[], start: number, length: number): boolean {
+  const end = Math.min(chars.length, start + length);
+  for (let index = Math.max(0, start - 1); index < end + 1; index++) {
+    if (chars[index] && chars[index] !== " ") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function emptyDayStats(): DayStats {
+  return {
+    messages: 0,
+    rageMessages: 0,
+    swears: 0,
+  };
+}
+
+function terminalWidth(): number {
+  const columns = process.stdout.columns;
+  if (typeof columns === "number" && Number.isFinite(columns) && columns > 0) {
+    return Math.floor(columns);
+  }
+
+  return DEFAULT_TERMINAL_WIDTH;
+}
+
+function parseTimestamp(timestamp: string | undefined): Date | null {
+  if (!timestamp) {
+    return null;
+  }
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
+}
+
+function dayKey(date: Date): string {
+  return [
+    String(date.getFullYear()),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function formatShortDate(date: Date): string {
+  return [
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("/");
+}
+
+function dateFromDayKey(key: string): Date {
+  const [year, month, day] = key.split("-").map(Number) as [number, number, number];
+  return new Date(year, month - 1, day);
+}
+
+function daysBetween(start: Date, end: Date): number {
+  const startUtc = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate());
+  const endUtc = Date.UTC(end.getFullYear(), end.getMonth(), end.getDate());
+  return Math.round((endUtc - startUtc) / DAY_MS);
+}
+
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function startOfWeek(date: Date): Date {
+  return addDays(date, -date.getDay());
+}
+
+function maxDate(a: Date, b: Date): Date {
+  return a > b ? a : b;
+}
+
+function pluralize(unit: string, count: number): string {
+  return count === 1 ? unit : `${unit}s`;
 }
 
 export async function cost(args: string[]): Promise<void> {
