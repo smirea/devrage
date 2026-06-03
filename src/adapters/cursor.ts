@@ -1,7 +1,8 @@
-import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import type { Adapter, AdapterOptions, Message, UsageRecord } from "./index";
 
 /**
@@ -19,6 +20,7 @@ const CANDIDATE_KEY_PREFIXES = [
 ];
 
 const STATE_TABLES = ["ItemTable", "cursorDiskKV"];
+const CURSOR_PROJECTS_DIR = join(homedir(), ".cursor", "projects");
 
 interface CursorStateStore {
   path: string;
@@ -41,6 +43,8 @@ export function cursorAdapter(): Adapter {
   return {
     name: "cursor",
     async *messages(options?: AdapterOptions): AsyncGenerator<Message> {
+      yield* walkAgentTranscriptStores(options);
+
       const stores = await discoverCursorStateStores();
 
       for (const store of stores) {
@@ -55,6 +59,147 @@ export function cursorAdapter(): Adapter {
       }
     },
   };
+}
+
+async function* walkAgentTranscriptStores(
+  options?: AdapterOptions,
+): AsyncGenerator<Message> {
+  if (!existsSync(CURSOR_PROJECTS_DIR)) {
+    return;
+  }
+
+  const rootTranscripts = join(CURSOR_PROJECTS_DIR, "agent-transcripts");
+  if (existsSync(rootTranscripts)) {
+    yield* walkTranscripts(rootTranscripts, { since: options?.since });
+  }
+
+  let projectDirs: string[];
+  try {
+    projectDirs = await readdir(CURSOR_PROJECTS_DIR);
+  } catch {
+    return;
+  }
+
+  for (const projectDir of projectDirs) {
+    if (projectDir === "agent-transcripts") {
+      continue;
+    }
+
+    const transcriptsDir = join(
+      CURSOR_PROJECTS_DIR,
+      projectDir,
+      "agent-transcripts",
+    );
+    if (!existsSync(transcriptsDir)) {
+      continue;
+    }
+
+    yield* walkTranscripts(transcriptsDir, {
+      project: projectDir,
+      since: options?.since,
+    });
+  }
+}
+
+async function* walkTranscripts(
+  dir: string,
+  context: { project?: string; since?: Date; pathParts?: string[] },
+): AsyncGenerator<Message> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    const entryStat = await stat(fullPath).catch(() => null);
+    if (!entryStat) {
+      continue;
+    }
+
+    if (entryStat.isDirectory()) {
+      yield* walkTranscripts(fullPath, {
+        ...context,
+        pathParts: [...(context.pathParts ?? []), entry],
+      });
+      continue;
+    }
+
+    if (!entry.endsWith(".jsonl")) {
+      continue;
+    }
+    if (context.since && entryStat.mtime < context.since) {
+      continue;
+    }
+
+    const session = [...(context.pathParts ?? []), entry.replace(".jsonl", "")]
+      .join("/");
+    yield* parseCursorJsonl(fullPath, {
+      session,
+      project: context.project,
+      since: context.since,
+    });
+  }
+}
+
+async function* parseCursorJsonl(
+  filePath: string,
+  context: { session: string; project?: string; since?: Date },
+): AsyncGenerator<Message> {
+  const rl = createInterface({
+    input: createReadStream(filePath, { encoding: "utf-8" }),
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of rl) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      if (entry["type"] === "metadata" || entry["type"] === "error") {
+        continue;
+      }
+      if (entry["role"] !== "user") {
+        continue;
+      }
+
+      const message = asRecord(entry["message"]);
+      if (!message?.["content"]) {
+        continue;
+      }
+
+      const rawText = contentToText(message["content"]);
+      if (!rawText) {
+        continue;
+      }
+
+      const text = stripCursorSystemContext(rawText);
+      if (!text.trim()) {
+        continue;
+      }
+
+      const timestamp = extractTranscriptTimestamp(rawText);
+      if (context.since && timestamp) {
+        const ts = new Date(timestamp);
+        if (Number.isFinite(ts.getTime()) && ts < context.since) {
+          continue;
+        }
+      }
+
+      yield {
+        text,
+        timestamp,
+        session: context.session,
+        project: context.project,
+      };
+    } catch {
+      continue;
+    }
+  }
 }
 
 async function discoverCursorStateStores(): Promise<CursorStateStore[]> {
@@ -614,6 +759,29 @@ function contentToText(value: unknown): string | null {
   }
 
   return firstTextField(record, ["text", "content", "message", "value"]);
+}
+
+function stripCursorSystemContext(text: string): string {
+  const queryMatch = text.match(/<user_query>\n?([\s\S]*?)\n?<\/user_query>/);
+  if (queryMatch?.[1]) {
+    return queryMatch[1].trim();
+  }
+
+  return text
+    .replace(/<timestamp>[\s\S]*?<\/timestamp>/g, "")
+    .replace(/<user_info>[\s\S]*?<\/user_info>/g, "")
+    .replace(/<system_reminder>[\s\S]*?<\/system_reminder>/g, "")
+    .replace(/<rules>[\s\S]*?<\/rules>/g, "")
+    .replace(/<attached_files>[\s\S]*?<\/attached_files>/g, "")
+    .replace(/<agent_transcripts>[\s\S]*?<\/agent_transcripts>/g, "")
+    .replace(/<agent_skills>[\s\S]*?<\/agent_skills>/g, "")
+    .replace(/<mcp_file_system>[\s\S]*?<\/mcp_file_system>/g, "")
+    .trim();
+}
+
+function extractTranscriptTimestamp(text: string): string | undefined {
+  const match = text.match(/<timestamp>([\s\S]*?)<\/timestamp>/);
+  return match?.[1] ? normalizeTimestamp(match[1].trim()) : undefined;
 }
 
 function extractTimestamp(record: Record<string, unknown>): string | undefined {
