@@ -70,28 +70,33 @@ export function opencodeAdapter(): Adapter {
   };
 }
 
-async function openOpencodeDb(): Promise<import("better-sqlite3").Database | null> {
+async function openOpencodeDb(): Promise<SqliteDatabase | null> {
   const dbPath = getOpencodeDatabasePath();
   if (!dbPath) {
     return null;
   }
 
-  // Dynamic import so the CLI doesn't crash if better-sqlite3 isn't available
   try {
     const BetterSqlite3 = await import("better-sqlite3");
-    const Ctor = BetterSqlite3.default ?? BetterSqlite3;
-    return new (Ctor as unknown as new (...args: unknown[]) => import("better-sqlite3").Database)(
-      dbPath,
-      { readonly: true },
-    );
+    const Ctor = (BetterSqlite3.default ??
+      BetterSqlite3) as unknown as SqliteDatabaseConstructor;
+    return new Ctor(dbPath, { readonly: true });
   } catch {
-    console.warn("devrage: better-sqlite3 not available, skipping OpenCode sessions");
-    return null;
+    try {
+      const bunSqlite = "bun:sqlite";
+      const mod = (await import(bunSqlite)) as {
+        Database: SqliteDatabaseConstructor;
+      };
+      return new mod.Database(dbPath, { readonly: true });
+    } catch {
+      console.warn("devrage: SQLite driver not available, skipping OpenCode sessions");
+      return null;
+    }
   }
 }
 
 function* queryUserMessages(
-  db: import("better-sqlite3").Database,
+  db: SqliteDatabase,
   options?: AdapterOptions,
 ): Generator<Message> {
   // Query: join message + part, filter to user role and text parts
@@ -135,7 +140,7 @@ function* queryUserMessages(
 
 /** OpenCode assistant messages store provider/model, billed cost, and token usage in message.data. */
 function* queryUsageRecords(
-  db: import("better-sqlite3").Database,
+  db: SqliteDatabase,
   options?: AdapterOptions,
 ): Generator<UsageRecord> {
   let where = `WHERE json_type(data, '$.tokens') = 'object'`;
@@ -214,3 +219,16 @@ function numberValue(value: unknown): number {
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
+
+type SqliteDatabase = {
+  prepare(sql: string): {
+    get(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  };
+  close(): void;
+};
+
+type SqliteDatabaseConstructor = new (
+  path: string,
+  options: { readonly: boolean },
+) => SqliteDatabase;

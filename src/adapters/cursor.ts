@@ -357,20 +357,26 @@ async function* parseCursorUsageStore(
   }
 }
 
-async function openCursorDb(dbPath: string): Promise<import("better-sqlite3").Database | null> {
+async function openCursorDb(dbPath: string): Promise<SqliteDatabase | null> {
   try {
     const BetterSqlite3 = await import("better-sqlite3");
-    const Ctor = BetterSqlite3.default ?? BetterSqlite3;
-    return new (Ctor as unknown as new (...args: unknown[]) => import("better-sqlite3").Database)(
-      dbPath,
-      { readonly: true },
-    );
+    const Ctor = (BetterSqlite3.default ??
+      BetterSqlite3) as unknown as SqliteDatabaseConstructor;
+    return new Ctor(dbPath, { readonly: true });
   } catch {
-    return null;
+    try {
+      const bunSqlite = "bun:sqlite";
+      const mod = (await import(bunSqlite)) as {
+        Database: SqliteDatabaseConstructor;
+      };
+      return new mod.Database(dbPath, { readonly: true });
+    } catch {
+      return null;
+    }
   }
 }
 
-function readStateRows(db: import("better-sqlite3").Database): StateRow[] {
+function readStateRows(db: SqliteDatabase): StateRow[] {
   const rows: StateRow[] = [];
 
   try {
@@ -866,3 +872,16 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
   return value as Record<string, unknown>;
 }
+
+type SqliteDatabase = {
+  prepare(sql: string): {
+    get(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  };
+  close(): void;
+};
+
+type SqliteDatabaseConstructor = new (
+  path: string,
+  options: { readonly: boolean },
+) => SqliteDatabase;
