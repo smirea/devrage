@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   allAdapters,
   createAdapter,
@@ -7,7 +10,7 @@ import {
   type PricingSource,
 } from "../adapters/index";
 import { detect } from "../detector/index";
-import { loadPricingCatalog, summarizeUsage } from "../pricing/index";
+import { getPricingCachePath, loadPricingCatalog, summarizeUsage } from "../pricing/index";
 
 // ANSI color helpers — no dependencies needed
 const c = {
@@ -83,6 +86,46 @@ interface CostTotals {
   totalRequests: number;
   pricedRequests: number;
   unpricedRequests: number;
+}
+
+interface CostReportModel {
+  model: string;
+  provider?: string;
+  estimatedCost: number;
+  billedCost: number;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+interface CostReportDay {
+  day: string;
+  estimatedCost: number;
+  billedCost: number;
+  requests: number;
+  models: CostReportModel[];
+}
+
+interface CostReportAgent {
+  name: string;
+  estimatedCost: number;
+  billedCost: number;
+  requests: number;
+  models: CostReportModel[];
+  days: CostReportDay[];
+}
+
+interface CostReportData {
+  generatedAt: string;
+  scope: string;
+  totalCost: number;
+  totalBilled: number;
+  pricedRequests: number;
+  unpricedRequests: number;
+  agents: CostReportAgent[];
 }
 
 function parseArgs(args: string[]): ScanOptions {
@@ -161,7 +204,7 @@ Usage:
   devrage cost [options]
 
 Options:
-  --agent, -a <name>   Show only a specific agent (claude, codex, opencode, amp)
+  --agent, -a <name>   Show only a specific agent (claude, codex, opencode, amp, pi)
   --refresh-prices     Refresh models.dev pricing before estimating cost
   --since, -s <date>   Only include usage after this date (ISO 8601)
   --day, --days [n]    Only include the last n days (default: 1)
@@ -361,20 +404,20 @@ export async function cost(args: string[]): Promise<void> {
     return;
   }
 
-  printCostCommand(totals, options);
+  const reportUrl = await writeCostHtmlReport(totals, options);
+  printCostCommand(totals, options, reportUrl);
 }
 
-function printCostCommand(totals: CostTotals, options: ScanOptions): void {
+function printCostCommand(totals: CostTotals, options: ScanOptions, reportUrl: string): void {
   const modelTotals = aggregateModelCosts(totals.entries);
-  const dailyTotals = aggregateDailyCosts(totals.entries);
 
   printCompactHeader(options);
   console.log(`  ${c.bold}${c.green}${formatCurrency(totals.totalCost)}${c.reset}`);
   console.log(`  ${compactMeta(totals)}`);
+  console.log(`  ${c.dim}Report:${c.reset} ${reportUrl}`);
 
   printCompactAgents(totals.entries);
   printCompactModels(modelTotals, totals.totalCost);
-  printCompactDaily(dailyTotals);
   console.log("");
 }
 
@@ -417,23 +460,6 @@ function printCompactModels(models: CostModelSummary[], totalCost: number): void
   }
 }
 
-function printCompactDaily(days: CostDaySummary[]): void {
-  const visibleDays = days.filter((day) => day.estimatedCost > 0).slice(-10);
-  if (visibleDays.length === 0) {
-    return;
-  }
-
-  const maxCost = Math.max(...visibleDays.map((day) => day.estimatedCost));
-  console.log("");
-  console.log(`  ${c.bold}daily${c.reset}`);
-  for (const day of visibleDays) {
-    const color = day.models[0] ? modelColor(day.models[0]) : c.cyan;
-    console.log(
-      `    ${formatShortDate(day.day).padEnd(6)} ${formatCurrency(day.estimatedCost).padStart(9)}  ${renderBar(day.estimatedCost, maxCost, 16, color)}`,
-    );
-  }
-}
-
 function printCompactAgents(entries: [string, CostSummary][]): void {
   console.log("");
   console.log(`  ${c.bold}agents${c.reset}`);
@@ -451,6 +477,315 @@ function printCostCommandUnavailable(options: ScanOptions): void {
   printCompactHeader(options);
   console.log(`  ${c.gray}no local usage found${c.reset}`);
   console.log("");
+}
+
+async function writeCostHtmlReport(totals: CostTotals, options: ScanOptions): Promise<string> {
+  const generatedAt = new Date().toISOString();
+  const reportPath = join(
+    dirname(getPricingCachePath()),
+    `cost-report-${safeTimestamp(generatedAt)}.html`,
+  );
+  await mkdir(dirname(reportPath), { recursive: true });
+  await writeFile(
+    reportPath,
+    renderCostHtmlReport(costReportData(totals, options, generatedAt)),
+    "utf-8",
+  );
+  return pathToFileURL(reportPath).href;
+}
+
+function safeTimestamp(value: string): string {
+  return value.replace(/[:.]/g, "-");
+}
+
+function costReportData(
+  totals: CostTotals,
+  options: ScanOptions,
+  generatedAt: string,
+): CostReportData {
+  return {
+    generatedAt,
+    scope:
+      options.rangeLabel ??
+      (options.since ? `since ${formatDate(options.since)}` : "all local history"),
+    totalCost: totals.totalCost,
+    totalBilled: totals.totalBilled,
+    pricedRequests: totals.pricedRequests,
+    unpricedRequests: totals.unpricedRequests,
+    agents: totals.entries
+      .map(([name, summary]) => ({
+        name,
+        estimatedCost: summary.estimatedCost,
+        billedCost: summary.billedCost,
+        requests: summary.requests - summary.unpricedRequests,
+        models: summary.models.map(costReportModel),
+        days: summary.days.map((day) => ({
+          day: day.day,
+          estimatedCost: day.estimatedCost,
+          billedCost: day.billedCost,
+          requests: day.requests - day.unpricedRequests,
+          models: day.models.map(costReportModel),
+        })),
+      }))
+      .sort((left, right) => right.estimatedCost - left.estimatedCost),
+  };
+}
+
+function costReportModel(model: CostModelSummary): CostReportModel {
+  return {
+    model: model.model,
+    provider: model.provider,
+    estimatedCost: model.estimatedCost,
+    billedCost: model.billedCost,
+    requests: model.requests - model.unpricedRequests,
+    inputTokens: model.inputTokens,
+    outputTokens: model.outputTokens,
+    reasoningTokens: model.reasoningTokens,
+    cacheReadTokens: model.cacheReadTokens,
+    cacheWriteTokens: model.cacheWriteTokens,
+  };
+}
+
+function renderCostHtmlReport(data: CostReportData): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>devrage cost report</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1117;
+      --panel: #151923;
+      --panel-2: #10141c;
+      --border: #283040;
+      --text: #edf1f7;
+      --muted: #99a3b5;
+      --faint: #677184;
+      --green: #55c98f;
+      --purple: #b18cff;
+      --blue: #75a7ff;
+      --yellow: #e5b75f;
+      --cyan: #62c7df;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 48px; }
+    header { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 22px; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
+    .scope { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .generated { color: var(--faint); font-size: 12px; text-align: right; }
+    .summary { display: grid; grid-template-columns: 1.4fr repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+    .card, .panel { border: 1px solid var(--border); background: var(--panel); }
+    .card { padding: 16px; min-height: 92px; }
+    .label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
+    .value { margin-top: 8px; font-size: 26px; font-weight: 800; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+    .primary .value { color: var(--green); font-size: 42px; }
+    .controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
+    select { width: 100%; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); padding: 10px 12px; font: inherit; border-radius: 0; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 14px; align-items: start; }
+    .panel { min-width: 0; }
+    .panel h2 { margin: 0; padding: 13px 14px; border-bottom: 1px solid var(--border); font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+    .panel-body { padding: 14px; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid #202838; text-align: left; white-space: nowrap; }
+    th { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+    td:not(:first-child), th:not(:first-child) { text-align: right; }
+    tr:last-child td { border-bottom: 0; }
+    .name { color: var(--text); font-weight: 650; }
+    .muted { color: var(--muted); }
+    .chart-wrap { min-width: 0; }
+    .chart { width: 100%; min-width: 0; height: 190px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: clamp(1px, 0.55vw, 8px); align-items: end; overflow: hidden; }
+    .bar-column { display: flex; align-items: end; min-width: 0; height: 190px; overflow: hidden; font-variant-numeric: tabular-nums; }
+    .chart-empty { align-self: center; }
+    .axis { position: relative; height: 24px; margin-top: 8px; border-top: 1px solid #202838; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; overflow: hidden; }
+    .axis-tick { position: absolute; top: 6px; transform: translateX(-50%); white-space: nowrap; }
+    .axis-tick.edge-start { transform: translateX(0); }
+    .axis-tick.edge-end { transform: translateX(-100%); }
+    .column-track { width: 100%; min-width: 0; height: 190px; display: flex; align-items: end; background: #202838; overflow: hidden; }
+    .column-fill { width: 100%; min-height: 2px; background: var(--cyan); }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px 14px; color: var(--muted); font-size: 12px; margin-top: 12px; }
+    .dot { display: inline-block; width: 9px; height: 9px; margin-right: 5px; background: var(--cyan); }
+    .tooltip { position: fixed; z-index: 20; display: none; pointer-events: none; border: 1px solid var(--border); background: #0b0e14; color: var(--text); padding: 7px 9px; font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35); }
+    .tooltip .sub { color: var(--muted); margin-top: 2px; }
+    .green { color: var(--green); } .purple { color: var(--purple); } .blue { color: var(--blue); } .yellow { color: var(--yellow); } .cyan { color: var(--cyan); }
+    .bg-green { background: var(--green); } .bg-purple { background: var(--purple); } .bg-blue { background: var(--blue); } .bg-yellow { background: var(--yellow); } .bg-cyan { background: var(--cyan); }
+    @media (max-width: 900px) { header, .grid { display: block; } .summary, .controls { grid-template-columns: 1fr; } .panel { margin-top: 14px; } .generated { text-align: left; margin-top: 8px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>devrage cost report</h1>
+        <div class="scope" id="scope"></div>
+      </div>
+      <div class="generated" id="generated"></div>
+    </header>
+    <section class="summary">
+      <div class="card primary"><div class="label">total</div><div class="value" id="totalCost"></div></div>
+      <div class="card"><div class="label">requests</div><div class="value" id="requestCount"></div></div>
+      <div class="card"><div class="label">billed</div><div class="value" id="billedCost"></div></div>
+      <div class="card"><div class="label">models</div><div class="value" id="modelCount"></div></div>
+    </section>
+    <section class="controls">
+      <label>Agent<select id="agentFilter"></select></label>
+      <label>Model<select id="modelFilter"></select></label>
+      <label>Range<select id="rangeFilter"><option value="all">All included data</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></label>
+    </section>
+    <section class="grid">
+      <div class="panel"><h2>Agents</h2><div class="panel-body"><table><thead><tr><th>Agent</th><th>Cost</th><th>Reqs</th><th>Billed</th></tr></thead><tbody id="agentRows"></tbody></table></div></div>
+      <div class="panel"><h2>Models</h2><div class="panel-body"><table><thead><tr><th>Model</th><th>Cost</th><th>Share</th><th>Reqs</th><th>Input</th><th>Output</th><th>Cache</th></tr></thead><tbody id="modelRows"></tbody></table><div class="legend"><span><i class="dot bg-purple"></i>Claude/Anthropic</span><span><i class="dot bg-green"></i>OpenAI</span><span><i class="dot bg-blue"></i>Google</span><span><i class="dot bg-yellow"></i>Kimi/GLM</span></div></div></div>
+      <div class="panel"><h2>Daily</h2><div class="panel-body"><div class="chart-wrap"><div class="chart" id="dailyChart"></div><div class="axis" id="dailyAxis"></div></div></div></div>
+    </section>
+    <div class="tooltip" id="tooltip"></div>
+  </main>
+  <script>
+    const DATA = ${jsonForScript(data)};
+    const $ = (id) => document.getElementById(id);
+    const money = (value) => '$' + (Math.floor(Math.max(0, value) * 100 + 1e-9) / 100).toFixed(2);
+    const number = (value) => Math.round(value).toLocaleString('en-US');
+    const pct = (value) => (value * 100).toFixed(1) + '%';
+    const esc = (value) => String(value).replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    const modelClass = (name, provider) => {
+      const model = String(name || '').toLowerCase();
+      const p = String(provider || '').toLowerCase();
+      if (p === 'anthropic' || model.startsWith('claude-')) return 'purple';
+      if (p === 'openai' || model.startsWith('gpt-') || /^o\\d/.test(model)) return 'green';
+      if (p === 'google' || model.startsWith('gemini-')) return 'blue';
+      if (model.startsWith('kimi-') || model.startsWith('glm-')) return 'yellow';
+      return 'cyan';
+    };
+    const shortDate = (day) => new Date(day + 'T00:00:00.000Z').toLocaleDateString('en-US', {month:'short', day:'numeric', timeZone:'UTC'});
+    function dailyTicks(days) {
+      const count = days.length;
+      if (count === 0) return [];
+      const maxTicks = count <= 7 ? count : count <= 31 ? 6 : count <= 90 ? 7 : 9;
+      if (maxTicks <= 1) return [{index: 0, day: days[0].day}];
+      const ticks = [];
+      const seen = new Set();
+      for (let tick = 0; tick < maxTicks; tick++) {
+        const index = Math.round(((count - 1) * tick) / (maxTicks - 1));
+        if (seen.has(index)) continue;
+        seen.add(index);
+        ticks.push({index, day: days[index].day});
+      }
+      return ticks;
+    }
+    function addModel(map, incoming) {
+      const key = incoming.model;
+      const row = map.get(key) || {model: incoming.model, provider: incoming.provider, estimatedCost: 0, billedCost: 0, requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0};
+      row.estimatedCost += incoming.estimatedCost; row.billedCost += incoming.billedCost; row.requests += incoming.requests;
+      row.inputTokens += incoming.inputTokens; row.outputTokens += incoming.outputTokens; row.reasoningTokens += incoming.reasoningTokens;
+      row.cacheReadTokens += incoming.cacheReadTokens; row.cacheWriteTokens += incoming.cacheWriteTokens;
+      map.set(key, row);
+    }
+    function filteredAgents() {
+      const selected = $('agentFilter').value;
+      return DATA.agents.filter((agent) => selected === 'all' || agent.name === selected);
+    }
+    function dayAllowed(day) {
+      const range = $('rangeFilter').value;
+      if (range === 'all') return true;
+      const cutoff = new Date(DATA.generatedAt).getTime() - Number(range) * 24 * 60 * 60 * 1000;
+      return new Date(day + 'T23:59:59.999Z').getTime() >= cutoff;
+    }
+    function selectedModelRows(models) {
+      const selected = $('modelFilter').value;
+      return models.filter((model) => selected === 'all' || model.model === selected);
+    }
+    function compute() {
+      const agents = filteredAgents();
+      const modelMap = new Map();
+      const dayMap = new Map();
+      let totalCost = 0, totalBilled = 0, requests = 0;
+      for (const agent of agents) {
+        const models = selectedModelRows(agent.models);
+        for (const model of models) { addModel(modelMap, model); totalCost += model.estimatedCost; totalBilled += model.billedCost; requests += model.requests; }
+        for (const day of agent.days) {
+          if (!dayAllowed(day.day)) continue;
+          const dayModels = selectedModelRows(day.models);
+          const cost = dayModels.reduce((sum, model) => sum + model.estimatedCost, 0);
+          const billed = dayModels.reduce((sum, model) => sum + model.billedCost, 0);
+          const reqs = dayModels.reduce((sum, model) => sum + model.requests, 0);
+          if (cost <= 0 && reqs <= 0) continue;
+          const row = dayMap.get(day.day) || {day: day.day, estimatedCost: 0, billedCost: 0, requests: 0};
+          row.estimatedCost += cost; row.billedCost += billed; row.requests += reqs; dayMap.set(day.day, row);
+        }
+      }
+      return {agents, models: Array.from(modelMap.values()).sort((a,b) => b.estimatedCost - a.estimatedCost), days: Array.from(dayMap.values()).sort((a,b) => a.day.localeCompare(b.day)), totalCost, totalBilled, requests};
+    }
+    function render() {
+      const view = compute();
+      $('totalCost').textContent = money(view.totalCost);
+      $('requestCount').textContent = number(view.requests);
+      $('billedCost').textContent = money(view.totalBilled);
+      $('modelCount').textContent = number(view.models.length);
+      const agentRows = view.agents.map((agent) => '<tr><td class="name">' + esc(agent.name) + '</td><td>' + money(agent.estimatedCost) + '</td><td>' + number(agent.requests) + '</td><td>' + money(agent.billedCost) + '</td></tr>').join('');
+      $('agentRows').innerHTML = agentRows || '<tr><td colspan="4" class="muted">No data</td></tr>';
+      const maxModel = Math.max(1, ...view.models.map((model) => model.estimatedCost));
+      $('modelRows').innerHTML = view.models.map((model) => {
+        const klass = modelClass(model.model, model.provider);
+        const cache = model.cacheReadTokens + model.cacheWriteTokens;
+        return '<tr><td class="name ' + klass + '">' + esc(model.model) + '</td><td>' + money(model.estimatedCost) + '</td><td>' + pct(view.totalCost > 0 ? model.estimatedCost / view.totalCost : 0) + '</td><td>' + number(model.requests) + '</td><td>' + number(model.inputTokens) + '</td><td>' + number(model.outputTokens + model.reasoningTokens) + '</td><td>' + number(cache) + '</td></tr>';
+      }).join('') || '<tr><td colspan="7" class="muted">No data</td></tr>';
+      const maxDay = Math.max(1, ...view.days.map((day) => day.estimatedCost));
+      $('dailyChart').innerHTML = view.days.length ? view.days.map((day) => {
+        const tooltip = esc(shortDate(day.day) + '|' + money(day.estimatedCost) + '|' + number(day.requests) + ' reqs');
+        return '<div class="bar-column" data-tooltip="' + tooltip + '"><div class="column-track"><div class="column-fill" style="height:' + Math.max(1, (day.estimatedCost / maxDay) * 100) + '%"></div></div></div>';
+      }).join('') : '<div class="muted chart-empty">No data</div>';
+      $('dailyAxis').innerHTML = dailyTicks(view.days).map((tick) => {
+        const left = view.days.length === 1 ? 50 : ((tick.index + 0.5) / view.days.length) * 100;
+        const edge = view.days.length === 1 ? '' : tick.index === 0 ? ' edge-start' : tick.index === view.days.length - 1 ? ' edge-end' : '';
+        return '<span class="axis-tick' + edge + '" style="left:' + left.toFixed(4) + '%">' + esc(shortDate(tick.day)) + '</span>';
+      }).join('');
+    }
+    function showTooltip(event) {
+      const target = event.target.closest('[data-tooltip]');
+      const tooltip = $('tooltip');
+      if (!target) { tooltip.style.display = 'none'; return; }
+      const [date, amount, requests] = target.dataset.tooltip.split('|');
+      tooltip.innerHTML = '<div>' + esc(date) + '</div><div class="sub">' + esc(amount) + ' · ' + esc(requests) + '</div>';
+      tooltip.style.display = 'block';
+      moveTooltip(event);
+    }
+    function moveTooltip(event) {
+      const tooltip = $('tooltip');
+      if (tooltip.style.display !== 'block') return;
+      const offset = 12;
+      const nextLeft = Math.min(window.innerWidth - tooltip.offsetWidth - 8, event.clientX + offset);
+      const nextTop = Math.min(window.innerHeight - tooltip.offsetHeight - 8, event.clientY + offset);
+      tooltip.style.left = Math.max(8, nextLeft) + 'px';
+      tooltip.style.top = Math.max(8, nextTop) + 'px';
+    }
+    function init() {
+      $('scope').textContent = DATA.scope;
+      $('generated').textContent = 'Generated ' + new Date(DATA.generatedAt).toLocaleString();
+      $('agentFilter').innerHTML = '<option value="all">All agents</option>' + DATA.agents.map((agent) => '<option value="' + esc(agent.name) + '">' + esc(agent.name) + '</option>').join('');
+      const models = Array.from(new Set(DATA.agents.flatMap((agent) => agent.models.map((model) => model.model)))).sort();
+      $('modelFilter').innerHTML = '<option value="all">All models</option>' + models.map((model) => '<option value="' + esc(model) + '">' + esc(model) + '</option>').join('');
+      ['agentFilter', 'modelFilter', 'rangeFilter'].forEach((id) => $(id).addEventListener('change', render));
+      $('dailyChart').addEventListener('mouseover', showTooltip);
+      $('dailyChart').addEventListener('mousemove', moveTooltip);
+      $('dailyChart').addEventListener('mouseleave', () => { $('tooltip').style.display = 'none'; });
+      render();
+    }
+    init();
+  </script>
+</body>
+</html>`;
+}
+
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function printReportHeader(options: ScanOptions): void {
@@ -748,6 +1083,8 @@ function agentColor(agent: string): string {
       return c.cyan;
     case "amp":
       return c.yellow;
+    case "pi":
+      return c.blue;
     case "cursor":
       return c.blue;
     default:
@@ -804,15 +1141,6 @@ function formatPercent(value: number): string {
 
 function formatDate(value: Date): string {
   return value.toISOString().slice(0, 10);
-}
-
-function formatShortDate(day: string): string {
-  const date = new Date(`${day}T00:00:00.000Z`);
-  if (isNaN(date.getTime())) {
-    return day;
-  }
-
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 function shouldShowBilledCost(estimatedCost: number, billedCost: number): boolean {

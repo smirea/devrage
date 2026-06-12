@@ -3,7 +3,7 @@ import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Adapter, AdapterOptions, Message } from "./index";
+import type { Adapter, AdapterOptions, Message, UsageRecord } from "./index";
 
 /**
  * Pi Agent stores sessions as JSONL files at:
@@ -23,6 +23,9 @@ export function piAdapter(): Adapter {
     name: "pi",
     async *messages(options?: AdapterOptions): AsyncGenerator<Message> {
       yield* walkPiSessions(PI_SESSIONS_DIR, options);
+    },
+    async *usage(options?: AdapterOptions): AsyncGenerator<UsageRecord> {
+      yield* walkPiUsageSessions(PI_SESSIONS_DIR, options);
     },
   };
 }
@@ -51,6 +54,34 @@ async function* walkPiSessions(
     } else if (entry.endsWith(".jsonl")) {
       const session = entry.replace(".jsonl", "");
       yield* parsePiJsonl(fullPath, { session, project, since: options?.since });
+    }
+  }
+}
+
+async function* walkPiUsageSessions(
+  dir: string,
+  options?: AdapterOptions,
+  project?: string,
+): AsyncGenerator<UsageRecord> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    const entryStat = await stat(fullPath).catch(() => null);
+    if (!entryStat) {
+      continue;
+    }
+
+    if (entryStat.isDirectory()) {
+      yield* walkPiUsageSessions(fullPath, options, project ?? entry);
+    } else if (entry.endsWith(".jsonl")) {
+      const session = entry.replace(".jsonl", "");
+      yield* parsePiUsageJsonl(fullPath, { session, project, since: options?.since });
     }
   }
 }
@@ -120,6 +151,78 @@ async function* parsePiJsonl(
   }
 }
 
+async function* parsePiUsageJsonl(
+  filePath: string,
+  context: { session: string; project?: string; since?: Date },
+): AsyncGenerator<UsageRecord> {
+  const rl = createInterface({
+    input: createReadStream(filePath, { encoding: "utf-8" }),
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of rl) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    try {
+      const entry = JSON.parse(line) as PiEntry;
+      if (entry.type !== "message") {
+        continue;
+      }
+
+      const message = entry.message;
+      if (!message || message.role !== "assistant") {
+        continue;
+      }
+
+      const usage = asRecord(message.usage);
+      if (!usage) {
+        continue;
+      }
+
+      const inputTokens = numberValue(usage["input"]);
+      const outputTokens = numberValue(usage["output"]);
+      const cacheReadTokens = numberValue(usage["cacheRead"]);
+      const cacheWriteTokens = numberValue(usage["cacheWrite"]);
+      if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) {
+        continue;
+      }
+
+      const timestamp =
+        typeof entry.timestamp === "string"
+          ? entry.timestamp
+          : typeof message.timestamp === "number"
+            ? new Date(message.timestamp).toISOString()
+            : undefined;
+      if (context.since && timestamp) {
+        const ts = new Date(timestamp);
+        if (ts < context.since) {
+          continue;
+        }
+      }
+
+      const responseModel = stringValue(message.responseModel);
+      const model = responseModel ?? stringValue(message.model);
+
+      yield {
+        agent: "pi",
+        provider: responseModel?.includes("/") ? undefined : stringValue(message.provider),
+        model,
+        timestamp,
+        session: context.session,
+        inputTokens,
+        outputTokens,
+        reasoningTokens: 0,
+        cacheReadTokens,
+        cacheWriteTokens,
+      };
+    } catch {
+      // Skip malformed lines
+    }
+  }
+}
+
 function contentToString(content: unknown): string | null {
   if (typeof content === "string") {
     return content;
@@ -144,5 +247,25 @@ interface PiEntry {
     role?: string;
     content?: unknown;
     timestamp?: number;
+    provider?: unknown;
+    model?: unknown;
+    responseModel?: unknown;
+    usage?: unknown;
   };
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
 }

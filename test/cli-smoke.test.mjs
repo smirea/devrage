@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,11 +62,11 @@ test("cost command renders only the cost dashboard", async () => {
   assert.match(output, /\$35\.00/);
   assert.match(output, /1 req/);
   assert.match(output, /models/);
-  assert.match(output, /daily/);
   assert.match(output, /agents/);
+  assert.match(output, /Report: file:\/\//);
   assert.match(output, /gpt-5\.5\s+\$35\.00/);
   assert.ok(output.indexOf("agents") < output.indexOf("models"));
-  assert.ok(output.indexOf("models") < output.indexOf("daily"));
+  assert.doesNotMatch(output, /daily/);
   assert.doesNotMatch(output, /estimated API-equivalent cost/);
   assert.doesNotMatch(output, /cost dashboard/);
   assert.doesNotMatch(output, /agent cost/);
@@ -74,6 +74,18 @@ test("cost command renders only the cost dashboard", async () => {
   assert.doesNotMatch(output, /total swears/);
   assert.doesNotMatch(output, /agent language/);
   assert.doesNotMatch(output, /top words/);
+
+  const report = await readReport(output);
+  assert.match(report, /devrage cost report/);
+  assert.match(report, /gpt-5\.5/);
+  assert.match(report, /Daily/);
+  assert.match(report, /bar-column/);
+  assert.match(report, /column-fill/);
+  assert.match(report, /data-tooltip/);
+  assert.match(report, /id="tooltip"/);
+  assert.doesNotMatch(report, /bar-row/);
+  assert.ok(report.indexOf("<h2>Agents</h2>") < report.indexOf("<h2>Models</h2>"));
+  assert.ok(report.indexOf("<h2>Models</h2>") < report.indexOf("<h2>Daily</h2>"));
 });
 
 test("cost range shortcuts default days to one day", async () => {
@@ -250,6 +262,26 @@ test("Amp cost reads nested usage ledger entries", async () => {
   assert.match(output, /gpt-5\.5\s+\$35\.00\s+1 requests catalog/);
 });
 
+test("Pi cost reads assistant usage from local sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-pi-"));
+  const cacheHome = join(root, "cache");
+  const sessionPath = join(root, ".pi", "agent", "sessions", "--fixture--", "session.jsonl");
+
+  await mkdir(dirname(sessionPath), { recursive: true });
+  await writePricingCache(cacheHome);
+  await writeFile(sessionPath, piSessionFixture(Date.now()));
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "pi", "--day"], {
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+    }),
+  );
+
+  assert.match(output, /pi\s+\$35\.00\s+1 req/);
+  assert.match(output, /gpt-5\.5\s+\$35\.00/);
+});
+
 test("Cursor scans user prompts and skips assistant-only state", async () => {
   const root = await mkdtemp(join(tmpdir(), "devrage-cursor-"));
   const configHome = join(root, "config");
@@ -286,6 +318,16 @@ async function runCli(args, env) {
     env: { ...process.env, ...env },
   });
   return result.stdout;
+}
+
+async function readReport(output) {
+  const match = output.match(/Report:\s+(file:\/\/\S+)/);
+  assert.ok(match, "expected report file URL in cost output");
+  assert.match(
+    match[1],
+    /cost-report-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.html$/,
+  );
+  return readFile(fileURLToPath(match[1]), "utf-8");
 }
 
 async function writePricingCache(cacheHome) {
@@ -398,6 +440,53 @@ function ampThreadFixture() {
       ],
     },
   };
+}
+
+function piSessionFixture(timestamp) {
+  const iso = new Date(timestamp).toISOString();
+  return `${JSON.stringify({
+    type: "session",
+    id: "session-1",
+    timestamp: iso,
+    cwd: "/fixture",
+  })}\n${JSON.stringify({
+    type: "message",
+    id: "user-1",
+    parentId: null,
+    timestamp: iso,
+    message: {
+      role: "user",
+      content: "hello",
+      timestamp,
+    },
+  })}\n${JSON.stringify({
+    type: "message",
+    id: "assistant-1",
+    parentId: "user-1",
+    timestamp: iso,
+    message: {
+      role: "assistant",
+      provider: "openrouter",
+      model: "auto",
+      responseModel: "openai/gpt-5.5",
+      content: [{ type: "text", text: "done" }],
+      timestamp,
+      usage: {
+        input: 1_000_000,
+        output: 1_000_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2_000_000,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+        },
+      },
+    },
+  })}\n`;
 }
 
 function createOpenCodeFixture(
