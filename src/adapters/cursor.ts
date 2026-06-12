@@ -93,10 +93,13 @@ async function discoverCursorStateStores(): Promise<CursorStateStore[]> {
 }
 
 function getCursorUserDirs(): string[] {
+  const configHome = envOrDefault("XDG_CONFIG_HOME", join(homedir(), ".config"));
+  const appData = envOrDefault("APPDATA", join(homedir(), "AppData", "Roaming"));
+
   return uniqueStrings([
     join(homedir(), "Library", "Application Support", "Cursor", "User"),
-    join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "Cursor", "User"),
-    join(process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming"), "Cursor", "User"),
+    join(configHome, "Cursor", "User"),
+    join(appData, "Cursor", "User"),
   ]);
 }
 
@@ -114,41 +117,45 @@ async function* parseCursorStore(
     const seen = new Set<string>();
 
     for (const row of rows) {
-      if (!isCandidateKey(row.key)) {
-        continue;
-      }
-
-      const parsed = parseJsonValue(row.value);
-      if (parsed === undefined) {
-        continue;
-      }
-
-      for (const message of extractCursorMessages(parsed, row.key)) {
-        const text = message.text.trim();
-        if (!isLikelyMessageText(text)) {
+      try {
+        if (!isCandidateKey(row.key)) {
           continue;
         }
 
-        if (options?.since && message.timestamp) {
-          const timestamp = new Date(message.timestamp);
-          if (Number.isFinite(timestamp.getTime()) && timestamp < options.since) {
+        const parsed = parseJsonValue(row.value);
+        if (parsed === undefined) {
+          continue;
+        }
+
+        for (const message of extractCursorMessages(parsed, row.key)) {
+          const text = message.text.trim();
+          if (!isLikelyMessageText(text)) {
             continue;
           }
-        }
 
-        const session = message.session ?? `${store.scope}:${row.key}`;
-        const dedupeKey = `${session}\u0000${message.timestamp ?? ""}\u0000${text}`;
-        if (seen.has(dedupeKey)) {
-          continue;
-        }
-        seen.add(dedupeKey);
+          if (options?.since && message.timestamp) {
+            const timestamp = new Date(message.timestamp);
+            if (Number.isFinite(timestamp.getTime()) && timestamp < options.since) {
+              continue;
+            }
+          }
 
-        yield {
-          text,
-          timestamp: message.timestamp,
-          session,
-          project: store.project,
-        };
+          const session = message.session ?? `${store.scope}:${row.key}`;
+          const dedupeKey = `${session}\u0000${message.timestamp ?? ""}\u0000${text}`;
+          if (seen.has(dedupeKey)) {
+            continue;
+          }
+          seen.add(dedupeKey);
+
+          yield {
+            text,
+            timestamp: message.timestamp,
+            session,
+            project: store.project,
+          };
+        }
+      } catch {
+        continue;
       }
     }
   } finally {
@@ -171,30 +178,34 @@ async function* parseCursorUsageStore(
     const seen = new Set<string>();
 
     for (const row of rows) {
-      if (!row.key.startsWith("bubbleId:")) {
-        continue;
-      }
-
-      const parsed = parseJsonValue(row.value);
-      const usage = extractCursorBubbleUsage(parsed, row.key, composerModels);
-      if (!usage) {
-        continue;
-      }
-
-      if (options?.since && usage.timestamp) {
-        const timestamp = new Date(usage.timestamp);
-        if (Number.isFinite(timestamp.getTime()) && timestamp < options.since) {
+      try {
+        if (!row.key.startsWith("bubbleId:")) {
           continue;
         }
-      }
 
-      const dedupeKey = `${usage.session ?? ""}\u0000${usage.timestamp ?? ""}\u0000${usage.model ?? ""}\u0000${usage.inputTokens}\u0000${usage.outputTokens}`;
-      if (seen.has(dedupeKey)) {
+        const parsed = parseJsonValue(row.value);
+        const usage = extractCursorBubbleUsage(parsed, row.key, composerModels);
+        if (!usage) {
+          continue;
+        }
+
+        if (options?.since && usage.timestamp) {
+          const timestamp = new Date(usage.timestamp);
+          if (Number.isFinite(timestamp.getTime()) && timestamp < options.since) {
+            continue;
+          }
+        }
+
+        const dedupeKey = `${usage.session ?? ""}\u0000${usage.timestamp ?? ""}\u0000${usage.model ?? ""}\u0000${usage.inputTokens}\u0000${usage.outputTokens}`;
+        if (seen.has(dedupeKey)) {
+          continue;
+        }
+        seen.add(dedupeKey);
+
+        yield usage;
+      } catch {
         continue;
       }
-      seen.add(dedupeKey);
-
-      yield usage;
     }
   } finally {
     db.close();
@@ -219,17 +230,17 @@ function readStateRows(db: import("better-sqlite3").Database): StateRow[] {
 
   try {
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
-      name: string;
+      name: unknown;
     }[];
-    const availableTables = new Set(tables.map((table) => table.name));
+    const availableTables = new Set(tables.flatMap((table) => stringValue(table.name) ?? []));
 
     for (const table of STATE_TABLES) {
       if (!availableTables.has(table)) {
         continue;
       }
 
-      const columns = db.prepare(`PRAGMA table_info("${table}")`).all() as { name: string }[];
-      const columnNames = new Set(columns.map((column) => column.name));
+      const columns = db.prepare(`PRAGMA table_info("${table}")`).all() as { name: unknown }[];
+      const columnNames = new Set(columns.flatMap((column) => stringValue(column.name) ?? []));
       if (!columnNames.has("key") || !columnNames.has("value")) {
         continue;
       }
@@ -665,6 +676,11 @@ function uniqueMessages(messages: ExtractedMessage[]): ExtractedMessage[] {
 
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+function envOrDefault(name: string, fallback: string): string {
+  const value = process.env[name];
+  return value && value.trim() ? value : fallback;
 }
 
 function numberValue(value: unknown): number {
