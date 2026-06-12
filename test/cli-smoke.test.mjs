@@ -61,11 +61,14 @@ test("cost command renders only the cost dashboard", async () => {
   assert.match(output, /devrage cost/);
   assert.match(output, /\$35\.00/);
   assert.match(output, /1 req/);
+  assert.match(output, /^  total$/m);
   assert.match(output, /models/);
   assert.match(output, /agents/);
   assert.match(output, /Report: file:\/\//);
   assert.match(output, /gpt-5\.5\s+\$35\.00/);
+  assert.ok(output.indexOf("total") < output.indexOf("agents"));
   assert.ok(output.indexOf("agents") < output.indexOf("models"));
+  assert.ok(output.indexOf("models") < output.indexOf("Report:"));
   assert.doesNotMatch(output, /daily/);
   assert.doesNotMatch(output, /estimated API-equivalent cost/);
   assert.doesNotMatch(output, /cost dashboard/);
@@ -86,6 +89,37 @@ test("cost command renders only the cost dashboard", async () => {
   assert.doesNotMatch(report, /bar-row/);
   assert.ok(report.indexOf("<h2>Agents</h2>") < report.indexOf("<h2>Models</h2>"));
   assert.ok(report.indexOf("<h2>Models</h2>") < report.indexOf("<h2>Daily</h2>"));
+});
+
+test("cost command caps terminal models to top 10", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-cost-model-cap-"));
+  const dataHome = join(root, "data");
+  const cacheHome = join(root, "cache");
+  const dbPath = join(dataHome, "opencode", "opencode.db");
+  const modelPricing = Object.fromEntries(
+    Array.from({ length: 11 }, (_, index) => [
+      `model-${String(index + 1).padStart(2, "0")}`,
+      { cost: { input: 0, output: 1 } },
+    ]),
+  );
+
+  await mkdir(dirname(dbPath), { recursive: true });
+  await writePricingCache(cacheHome, modelPricing);
+  createOpenCodeMultiModelFixture(dbPath);
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "opencode", "--since", "2026-06-01"], {
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+      XDG_DATA_HOME: dataHome,
+    }),
+  );
+
+  assert.match(output, /model-10/);
+  assert.doesNotMatch(output, /model-11/);
+
+  const report = await readReport(output);
+  assert.match(report, /model-11/);
 });
 
 test("cost range shortcuts default days to one day", async () => {
@@ -286,8 +320,9 @@ test("Cursor scans user prompts and skips assistant-only state", async () => {
   const root = await mkdtemp(join(tmpdir(), "devrage-cursor-"));
   const configHome = join(root, "config");
   const appData = join(root, "AppData", "Roaming");
+  const cursorDirs = cursorUserDirs(root, configHome, appData);
   const statePath = join(
-    cursorUserDir(root, configHome, appData),
+    cursorDirs.mac,
     "workspaceStorage",
     "ws",
     "state.vscdb",
@@ -304,11 +339,61 @@ test("Cursor scans user prompts and skips assistant-only state", async () => {
     }),
   );
 
-  assert.match(output, /messages scanned\s+2/);
-  assert.match(output, /total swears\s+2/);
+  assert.match(output, /messages scanned\s+3/);
+  assert.match(output, /total swears\s+3/);
   assert.match(output, /fuck\s+1/);
-  assert.match(output, /crap\s+1/);
+  assert.match(output, /crap\s+2/);
   assert.doesNotMatch(output, /shit\s+1/);
+});
+
+test("Cursor discovers macOS, Linux, and Windows storage roots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-cursor-roots-"));
+  const configHome = join(root, "config");
+  const appData = join(root, "AppData", "Roaming");
+  const cursorDirs = cursorUserDirs(root, configHome, appData);
+
+  for (const [platform, userDir] of Object.entries(cursorDirs)) {
+    const statePath = join(userDir, "globalStorage", "state.vscdb");
+    await mkdir(dirname(statePath), { recursive: true });
+    createCursorPromptFixture(statePath, `${platform} fuck`);
+  }
+
+  const output = stripAnsi(
+    await runCli(["scan", "--agent", "cursor"], {
+      APPDATA: appData,
+      HOME: root,
+      XDG_CONFIG_HOME: configHome,
+    }),
+  );
+
+  assert.match(output, /messages scanned\s+3/);
+  assert.match(output, /total swears\s+3/);
+  assert.match(output, /fuck\s+3/);
+});
+
+test("Cursor cost reads modern bubble token usage when present", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-cursor-cost-"));
+  const cacheHome = join(root, "cache");
+  const configHome = join(root, "config");
+  const appData = join(root, "AppData", "Roaming");
+  const cursorDirs = cursorUserDirs(root, configHome, appData);
+  const statePath = join(cursorDirs.linux, "globalStorage", "state.vscdb");
+
+  await mkdir(dirname(statePath), { recursive: true });
+  await writePricingCache(cacheHome);
+  createCursorCostFixture(statePath);
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "cursor", "--since", "2026-06-01"], {
+      APPDATA: appData,
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+      XDG_CONFIG_HOME: configHome,
+    }),
+  );
+
+  assert.match(output, /cursor\s+\$35\.00\s+1 req/);
+  assert.match(output, /gpt-5\.5\s+\$35\.00/);
 });
 
 async function runCli(args, env) {
@@ -330,7 +415,7 @@ async function readReport(output) {
   return readFile(fileURLToPath(match[1]), "utf-8");
 }
 
-async function writePricingCache(cacheHome) {
+async function writePricingCache(cacheHome, extraOpenAiModels = {}) {
   const cacheDir = join(cacheHome, "devrage");
   await mkdir(cacheDir, { recursive: true });
   await writeFile(
@@ -343,6 +428,7 @@ async function writePricingCache(cacheHome) {
         openai: {
           models: {
             "gpt-5.5": { cost: { input: 5, output: 30, cache_read: 0.5 } },
+            ...extraOpenAiModels,
           },
         },
         anthropic: {
@@ -547,22 +633,57 @@ function createOpenCodeFixture(
   }
 }
 
-function cursorUserDir(home, configHome, appData) {
-  if (process.platform === "darwin") {
-    return join(home, "Library", "Application Support", "Cursor", "User");
-  }
+function createOpenCodeMultiModelFixture(
+  dbPath,
+  timestamp = Date.parse("2026-06-02T00:00:00.000Z"),
+) {
+  const db = new Database(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE message (
+        id TEXT PRIMARY KEY,
+        session_id TEXT,
+        time_created INTEGER,
+        time_updated INTEGER,
+        data TEXT
+      );
+    `);
 
-  if (process.platform === "win32") {
-    return join(appData, "Cursor", "User");
+    const insertMessage = db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)");
+    for (let index = 0; index < 11; index++) {
+      const rank = index + 1;
+      insertMessage.run(
+        `assistant-${rank}`,
+        "session-1",
+        timestamp + index,
+        timestamp + index,
+        JSON.stringify({
+          role: "assistant",
+          providerID: "openai",
+          modelID: `model-${String(rank).padStart(2, "0")}`,
+          cost: 0,
+          tokens: { input: 0, output: 12_000_000 - rank * 1_000_000 },
+        }),
+      );
+    }
+  } finally {
+    db.close();
   }
+}
 
-  return join(configHome, "Cursor", "User");
+function cursorUserDirs(home, configHome, appData) {
+  return {
+    mac: join(home, "Library", "Application Support", "Cursor", "User"),
+    linux: join(configHome, "Cursor", "User"),
+    windows: join(appData, "Cursor", "User"),
+  };
 }
 
 function createCursorFixture(dbPath) {
   const db = new Database(dbPath);
   try {
     db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)");
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)");
     db.prepare("INSERT INTO ItemTable VALUES (?, ?)").run(
       "composer.composerData",
       JSON.stringify({
@@ -576,6 +697,72 @@ function createCursorFixture(dbPath) {
     db.prepare("INSERT INTO ItemTable VALUES (?, ?)").run(
       "aiService.prompts",
       JSON.stringify("please fix this fuck"),
+    );
+    db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+      "composerData:composer-1",
+      JSON.stringify({
+        composerId: "composer-1",
+        modelConfig: { modelName: "gpt-5.5" },
+      }),
+    );
+    db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+      "bubbleId:composer-1:user-1",
+      JSON.stringify({
+        type: 1,
+        bubbleId: "user-1",
+        text: "modern cursor crap",
+        createdAt: "2026-06-02T00:00:02.000Z",
+        tokenCount: { inputTokens: 0, outputTokens: 0 },
+      }),
+    );
+    db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+      "bubbleId:composer-1:assistant-1",
+      JSON.stringify({
+        type: 2,
+        bubbleId: "assistant-1",
+        text: "assistant says shit",
+        createdAt: "2026-06-02T00:00:03.000Z",
+        tokenCount: { inputTokens: 0, outputTokens: 0 },
+      }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function createCursorPromptFixture(dbPath, text) {
+  const db = new Database(dbPath);
+  try {
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)");
+    db.prepare("INSERT INTO ItemTable VALUES (?, ?)").run(
+      "aiService.prompts",
+      JSON.stringify(text),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function createCursorCostFixture(dbPath) {
+  const db = new Database(dbPath);
+  try {
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)");
+    db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+      "composerData:composer-1",
+      JSON.stringify({
+        composerId: "composer-1",
+        modelConfig: { modelName: "gpt-5.5" },
+      }),
+    );
+    db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+      "bubbleId:composer-1:assistant-1",
+      JSON.stringify({
+        type: 2,
+        bubbleId: "assistant-1",
+        text: "done",
+        createdAt: "2026-06-02T00:00:03.000Z",
+        tokenCount: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+      }),
     );
   } finally {
     db.close();

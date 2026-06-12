@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Adapter, AdapterOptions, Message } from "./index";
+import type { Adapter, AdapterOptions, Message, UsageRecord } from "./index";
 
 /**
  * Reads Cursor's VS Code-style state stores read-only. Extraction is limited to
@@ -10,6 +10,8 @@ import type { Adapter, AdapterOptions, Message } from "./index";
  */
 
 const CANDIDATE_KEY_PREFIXES = [
+  "bubbleId:",
+  "composerData:",
   "composer.composerData",
   "aiService.prompts",
   "aiService.generations",
@@ -45,50 +47,57 @@ export function cursorAdapter(): Adapter {
         yield* parseCursorStore(store, options);
       }
     },
+    async *usage(options?: AdapterOptions): AsyncGenerator<UsageRecord> {
+      const stores = await discoverCursorStateStores();
+
+      for (const store of stores) {
+        yield* parseCursorUsageStore(store, options);
+      }
+    },
   };
 }
 
 async function discoverCursorStateStores(): Promise<CursorStateStore[]> {
-  const userDir = getCursorUserDir();
-  if (!existsSync(userDir)) {
-    return [];
-  }
-
   const stores: CursorStateStore[] = [];
-  const globalState = join(userDir, "globalStorage", "state.vscdb");
-  if (existsSync(globalState)) {
-    stores.push({ path: globalState, scope: "global" });
-  }
+  const seen = new Set<string>();
 
-  const workspaceRoot = join(userDir, "workspaceStorage");
-  let workspaceIds: string[] = [];
-  try {
-    workspaceIds = await readdir(workspaceRoot);
-  } catch {
-    return stores;
-  }
+  for (const userDir of getCursorUserDirs()) {
+    if (!existsSync(userDir)) {
+      continue;
+    }
 
-  for (const workspaceId of workspaceIds) {
-    const statePath = join(workspaceRoot, workspaceId, "state.vscdb");
-    if (existsSync(statePath)) {
-      stores.push({ path: statePath, scope: "workspace", project: workspaceId });
+    const globalState = join(userDir, "globalStorage", "state.vscdb");
+    if (existsSync(globalState) && !seen.has(globalState)) {
+      seen.add(globalState);
+      stores.push({ path: globalState, scope: "global" });
+    }
+
+    const workspaceRoot = join(userDir, "workspaceStorage");
+    let workspaceIds: string[] = [];
+    try {
+      workspaceIds = await readdir(workspaceRoot);
+    } catch {
+      continue;
+    }
+
+    for (const workspaceId of workspaceIds) {
+      const statePath = join(workspaceRoot, workspaceId, "state.vscdb");
+      if (existsSync(statePath) && !seen.has(statePath)) {
+        seen.add(statePath);
+        stores.push({ path: statePath, scope: "workspace", project: workspaceId });
+      }
     }
   }
 
   return stores;
 }
 
-function getCursorUserDir(): string {
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Application Support", "Cursor", "User");
-  }
-
-  if (process.platform === "win32") {
-    const appData = process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming");
-    return join(appData, "Cursor", "User");
-  }
-
-  return join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "Cursor", "User");
+function getCursorUserDirs(): string[] {
+  return uniqueStrings([
+    join(homedir(), "Library", "Application Support", "Cursor", "User"),
+    join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "Cursor", "User"),
+    join(process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming"), "Cursor", "User"),
+  ]);
 }
 
 async function* parseCursorStore(
@@ -141,6 +150,51 @@ async function* parseCursorStore(
           project: store.project,
         };
       }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+async function* parseCursorUsageStore(
+  store: CursorStateStore,
+  options?: AdapterOptions,
+): AsyncGenerator<UsageRecord> {
+  const db = await openCursorDb(store.path);
+  if (!db) {
+    return;
+  }
+
+  try {
+    const rows = readStateRows(db);
+    const composerModels = collectComposerModels(rows);
+    const seen = new Set<string>();
+
+    for (const row of rows) {
+      if (!row.key.startsWith("bubbleId:")) {
+        continue;
+      }
+
+      const parsed = parseJsonValue(row.value);
+      const usage = extractCursorBubbleUsage(parsed, row.key, composerModels);
+      if (!usage) {
+        continue;
+      }
+
+      if (options?.since && usage.timestamp) {
+        const timestamp = new Date(usage.timestamp);
+        if (Number.isFinite(timestamp.getTime()) && timestamp < options.since) {
+          continue;
+        }
+      }
+
+      const dedupeKey = `${usage.session ?? ""}\u0000${usage.timestamp ?? ""}\u0000${usage.model ?? ""}\u0000${usage.inputTokens}\u0000${usage.outputTokens}`;
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+
+      yield usage;
     }
   } finally {
     db.close();
@@ -234,6 +288,11 @@ function decodeStateValue(value: unknown): string | null {
 }
 
 function extractCursorMessages(root: unknown, rowKey: string): ExtractedMessage[] {
+  if (rowKey.startsWith("bubbleId:")) {
+    const message = extractCursorBubbleMessage(root, rowKey);
+    return message ? [message] : [];
+  }
+
   const messages: ExtractedMessage[] = [];
   collectRoleMessages(root, messages);
 
@@ -242,6 +301,131 @@ function extractCursorMessages(root: unknown, rowKey: string): ExtractedMessage[
   }
 
   return uniqueMessages(messages);
+}
+
+function extractCursorBubbleMessage(root: unknown, rowKey: string): ExtractedMessage | null {
+  const record = asRecord(root);
+  if (!record || numberValue(record["type"]) !== 1) {
+    return null;
+  }
+
+  const text = firstTextField(record, ["text", "richText"]);
+  if (!text) {
+    return null;
+  }
+
+  return {
+    text,
+    timestamp: extractTimestamp(record),
+    session: cursorBubbleSession(rowKey) ?? extractSession(record),
+  };
+}
+
+function collectComposerModels(rows: StateRow[]): Map<string, string> {
+  const models = new Map<string, string>();
+
+  for (const row of rows) {
+    if (!row.key.startsWith("composerData:")) {
+      continue;
+    }
+
+    const parsed = parseJsonValue(row.value);
+    const record = asRecord(parsed);
+    if (!record) {
+      continue;
+    }
+
+    const composerId = stringValue(record["composerId"]) ?? row.key.slice("composerData:".length);
+    const model = extractCursorModel(record);
+    if (composerId && model) {
+      models.set(composerId, model);
+    }
+  }
+
+  return models;
+}
+
+function extractCursorBubbleUsage(
+  root: unknown,
+  rowKey: string,
+  composerModels: Map<string, string>,
+): UsageRecord | null {
+  const record = asRecord(root);
+  if (!record || numberValue(record["type"]) !== 2) {
+    return null;
+  }
+
+  const tokenCount = asRecord(record["tokenCount"]);
+  if (!tokenCount) {
+    return null;
+  }
+
+  const inputTokens = numberValue(tokenCount["inputTokens"] ?? tokenCount["input"]);
+  const outputTokens = numberValue(tokenCount["outputTokens"] ?? tokenCount["output"]);
+  const cacheReadTokens = numberValue(tokenCount["cacheReadTokens"] ?? tokenCount["cacheRead"]);
+  const cacheWriteTokens = numberValue(tokenCount["cacheWriteTokens"] ?? tokenCount["cacheWrite"]);
+  if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) {
+    return null;
+  }
+
+  const composerId = cursorBubbleSession(rowKey);
+  const model =
+    extractCursorModel(record) ?? (composerId ? composerModels.get(composerId) : undefined);
+
+  return {
+    agent: "cursor",
+    model,
+    timestamp: extractTimestamp(record),
+    session: composerId ?? extractSession(record),
+    inputTokens,
+    outputTokens,
+    reasoningTokens: numberValue(tokenCount["reasoningTokens"] ?? tokenCount["reasoning"]),
+    cacheReadTokens,
+    cacheWriteTokens,
+  };
+}
+
+function extractCursorModel(record: Record<string, unknown>): string | undefined {
+  const direct = firstStringField(record, ["model", "modelName", "modelId"]);
+  if (direct) {
+    return direct;
+  }
+
+  for (const field of ["modelInfo", "modelConfig"]) {
+    const modelRecord = asRecord(record[field]);
+    if (!modelRecord) {
+      continue;
+    }
+
+    const nested = firstStringField(modelRecord, ["modelName", "modelId", "id", "name"]);
+    if (nested && nested !== "default") {
+      return nested;
+    }
+
+    const selected = modelRecord["selectedModels"];
+    if (Array.isArray(selected)) {
+      for (const item of selected) {
+        const itemRecord = asRecord(item);
+        const selectedModel = itemRecord
+          ? firstStringField(itemRecord, ["modelId", "modelName", "id", "name"])
+          : undefined;
+        if (selectedModel && selectedModel !== "default") {
+          return selectedModel;
+        }
+      }
+    }
+
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return undefined;
+}
+
+function cursorBubbleSession(rowKey: string): string | undefined {
+  const [, composerId] = rowKey.split(":");
+  return composerId?.trim() || undefined;
 }
 
 function collectRoleMessages(
@@ -385,6 +569,17 @@ function firstTextField(record: Record<string, unknown>, fields: string[]): stri
   return null;
 }
 
+function firstStringField(record: Record<string, unknown>, fields: string[]): string | undefined {
+  for (const field of fields) {
+    const value = stringValue(record[field]);
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
 function contentToText(value: unknown): string | null {
   if (typeof value === "string") {
     return value;
@@ -459,6 +654,18 @@ function uniqueMessages(messages: ExtractedMessage[]): ExtractedMessage[] {
   }
 
   return unique;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

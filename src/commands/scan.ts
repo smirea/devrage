@@ -27,6 +27,8 @@ const c = {
   gray: "\x1b[90m",
 };
 
+const MAX_TERMINAL_MODELS = 10;
+
 const SPINNER_MESSAGES = [
   "Tallying the damage",
   "Reviewing your outbursts",
@@ -204,7 +206,7 @@ Usage:
   devrage cost [options]
 
 Options:
-  --agent, -a <name>   Show only a specific agent (claude, codex, opencode, amp, pi)
+  --agent, -a <name>   Show only a specific agent (claude, codex, cursor, opencode, amp, pi)
   --refresh-prices     Refresh models.dev pricing before estimating cost
   --since, -s <date>   Only include usage after this date (ISO 8601)
   --day, --days [n]    Only include the last n days (default: 1)
@@ -412,12 +414,11 @@ function printCostCommand(totals: CostTotals, options: ScanOptions, reportUrl: s
   const modelTotals = aggregateModelCosts(totals.entries);
 
   printCompactHeader(options);
-  console.log(`  ${c.bold}${c.green}${formatCurrency(totals.totalCost)}${c.reset}`);
-  console.log(`  ${compactMeta(totals)}`);
-  console.log(`  ${c.dim}Report:${c.reset} ${reportUrl}`);
-
+  printCompactTotal(totals);
   printCompactAgents(totals.entries);
   printCompactModels(modelTotals, totals.totalCost);
+  console.log("");
+  console.log(`  ${c.dim}Report:${c.reset} ${reportUrl}`);
   console.log("");
 }
 
@@ -443,15 +444,23 @@ function compactMeta(totals: CostTotals): string {
   return `${c.dim}${parts.join(" · ")}${c.reset}`;
 }
 
+function printCompactTotal(totals: CostTotals): void {
+  console.log(`  ${c.bold}total${c.reset}`);
+  console.log(
+    `    ${c.bold}${c.green}${formatCurrency(totals.totalCost)}${c.reset}  ${compactMeta(totals)}`,
+  );
+}
+
 function printCompactModels(models: CostModelSummary[], totalCost: number): void {
   if (models.length === 0) {
     return;
   }
 
-  const maxCost = models[0]?.estimatedCost ?? 0;
+  const visibleModels = models.slice(0, MAX_TERMINAL_MODELS);
+  const maxCost = visibleModels[0]?.estimatedCost ?? 0;
   console.log("");
   console.log(`  ${c.bold}models${c.reset}`);
-  for (const model of models) {
+  for (const model of visibleModels) {
     const share = totalCost > 0 ? model.estimatedCost / totalCost : 0;
     const color = modelColor(model);
     console.log(
