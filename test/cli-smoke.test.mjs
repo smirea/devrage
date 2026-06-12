@@ -13,7 +13,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const cliPath = join(repoRoot, "dist", "cli.js");
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
-test("OpenCode cost uses cached models.dev pricing and keeps billed cost separate", async () => {
+test("OpenCode cost uses cached models.dev pricing", async () => {
   const root = await mkdtemp(join(tmpdir(), "devrage-opencode-"));
   const dataHome = join(root, "data");
   const cacheHome = join(root, "cache");
@@ -24,20 +24,16 @@ test("OpenCode cost uses cached models.dev pricing and keeps billed cost separat
   createOpenCodeFixture(dbPath);
 
   const output = stripAnsi(
-    await runCli(["scan", "--agent", "opencode", "--cost", "--since", "2026-06-01"], {
+    await runCli(["cost", "--agent", "opencode", "--since", "2026-06-01"], {
       HOME: root,
       XDG_CACHE_HOME: cacheHome,
       XDG_DATA_HOME: dataHome,
     }),
   );
 
-  assert.match(output, /messages scanned\s+1/);
-  assert.match(output, /cost dashboard/);
-  assert.match(output, /model mix/);
-  assert.match(output, /daily spend/);
-  assert.match(output, /2026-06-02\s+\$35\.00/);
+  assert.match(output, /devrage cost/);
   assert.match(output, /gpt-5\.5\s+\$35\.00/);
-  assert.match(output, /billed \$0\.00/);
+  assert.doesNotMatch(output, /billed/i);
 });
 
 test("cost command renders only the cost dashboard", async () => {
@@ -75,6 +71,7 @@ test("cost command renders only the cost dashboard", async () => {
   assert.doesNotMatch(output, /agent cost/);
   assert.doesNotMatch(output, /messages scanned/);
   assert.doesNotMatch(output, /total swears/);
+  assert.doesNotMatch(output, /billed/i);
   assert.doesNotMatch(output, /agent language/);
   assert.doesNotMatch(output, /top words/);
 
@@ -86,6 +83,7 @@ test("cost command renders only the cost dashboard", async () => {
   assert.match(report, /column-fill/);
   assert.match(report, /data-tooltip/);
   assert.match(report, /id="tooltip"/);
+  assert.doesNotMatch(report, /billed/i);
   assert.doesNotMatch(report, /bar-row/);
   assert.ok(report.indexOf("<h2>Agents</h2>") < report.indexOf("<h2>Models</h2>"));
   assert.ok(report.indexOf("<h2>Models</h2>") < report.indexOf("<h2>Daily</h2>"));
@@ -241,14 +239,14 @@ test("Claude cost uses assistant usage once per streamed request", async () => {
   );
 
   const output = stripAnsi(
-    await runCli(["scan", "--agent", "claude", "--cost"], {
+    await runCli(["cost", "--agent", "claude"], {
       HOME: root,
       XDG_CACHE_HOME: cacheHome,
     }),
   );
 
-  assert.match(output, /messages scanned\s+1/);
-  assert.match(output, /claude-opus-4-7\s+\$36\.75\s+1 requests catalog/);
+  assert.match(output, /claude\s+\$36\.75\s+1 req/);
+  assert.match(output, /claude-opus-4-7\s+\$36\.75/);
 });
 
 test("Codex cost uses cumulative token deltas without double-counting repeats", async () => {
@@ -264,14 +262,14 @@ test("Codex cost uses cumulative token deltas without double-counting repeats", 
   );
 
   const output = stripAnsi(
-    await runCli(["scan", "--agent", "codex", "--cost"], {
+    await runCli(["cost", "--agent", "codex"], {
       HOME: root,
       XDG_CACHE_HOME: cacheHome,
     }),
   );
 
-  assert.match(output, /messages scanned\s+1/);
-  assert.match(output, /gpt-5\.5\s+\$35\.05\s+1 requests catalog/);
+  assert.match(output, /codex\s+\$35\.05\s+1 req/);
+  assert.match(output, /gpt-5\.5\s+\$35\.05/);
 });
 
 test("Amp cost reads nested usage ledger entries", async () => {
@@ -285,15 +283,15 @@ test("Amp cost reads nested usage ledger entries", async () => {
   await writeFile(threadPath, JSON.stringify(ampThreadFixture()));
 
   const output = stripAnsi(
-    await runCli(["scan", "--agent", "amp", "--cost"], {
+    await runCli(["cost", "--agent", "amp"], {
       HOME: root,
       XDG_CACHE_HOME: cacheHome,
       XDG_DATA_HOME: dataHome,
     }),
   );
 
-  assert.match(output, /messages scanned\s+1/);
-  assert.match(output, /gpt-5\.5\s+\$35\.00\s+1 requests catalog/);
+  assert.match(output, /amp\s+\$35\.00\s+1 req/);
+  assert.match(output, /gpt-5\.5\s+\$35\.00/);
 });
 
 test("Pi cost reads assistant usage from local sessions", async () => {

@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 import {
   allAdapters,
   createAdapter,
-  type CostDaySummary,
   type CostModelSummary,
   type CostSummary,
   type PricingSource,
@@ -74,8 +73,6 @@ function createSpinner(messages = SPINNER_MESSAGES) {
 
 interface ScanOptions {
   agent?: string;
-  cost?: boolean;
-  costOnly?: boolean;
   refreshPrices?: boolean;
   since?: Date;
   rangeLabel?: string;
@@ -84,7 +81,6 @@ interface ScanOptions {
 interface CostTotals {
   entries: [string, CostSummary][];
   totalCost: number;
-  totalBilled: number;
   totalRequests: number;
   pricedRequests: number;
   unpricedRequests: number;
@@ -94,7 +90,6 @@ interface CostReportModel {
   model: string;
   provider?: string;
   estimatedCost: number;
-  billedCost: number;
   requests: number;
   inputTokens: number;
   outputTokens: number;
@@ -106,7 +101,6 @@ interface CostReportModel {
 interface CostReportDay {
   day: string;
   estimatedCost: number;
-  billedCost: number;
   requests: number;
   models: CostReportModel[];
 }
@@ -114,7 +108,6 @@ interface CostReportDay {
 interface CostReportAgent {
   name: string;
   estimatedCost: number;
-  billedCost: number;
   requests: number;
   models: CostReportModel[];
   days: CostReportDay[];
@@ -124,7 +117,6 @@ interface CostReportData {
   generatedAt: string;
   scope: string;
   totalCost: number;
-  totalBilled: number;
   pricedRequests: number;
   unpricedRequests: number;
   agents: CostReportAgent[];
@@ -137,10 +129,6 @@ function parseArgs(args: string[]): ScanOptions {
     const arg = args[i];
     if (arg === "--agent" || arg === "-a") {
       options.agent = args[++i];
-    } else if (arg === "--cost") {
-      options.cost = true;
-    } else if (arg === "--refresh-prices") {
-      options.refreshPrices = true;
     } else if (arg === "--since" || arg === "-s") {
       const val = args[++i];
       if (val) {
@@ -161,8 +149,6 @@ function parseArgs(args: string[]): ScanOptions {
 
 Options:
   --agent, -a <name>   Scan only a specific agent (claude, codex, cursor, opencode, amp, cline, pi, zed)
-  --cost               Estimate API-equivalent cost from token usage when available
-  --refresh-prices     Refresh models.dev pricing before estimating cost
   --since, -s <date>   Only scan messages after this date (ISO 8601)
   --day, --days [n]    Only scan the last n days (default: 1)
   --week               Only scan the last 7 days
@@ -176,7 +162,7 @@ Options:
 }
 
 function parseCostArgs(args: string[]): ScanOptions {
-  const options: ScanOptions = { cost: true, costOnly: true };
+  const options: ScanOptions = {};
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -263,9 +249,6 @@ export async function scan(args: string[]): Promise<void> {
   const options = parseArgs(args);
 
   const adapters = options.agent ? [createAdapter(options.agent)] : allAdapters();
-  const pricing = options.cost
-    ? await loadPricingCatalog({ refresh: options.refreshPrices })
-    : null;
 
   const spinner = createSpinner();
   spinner.start();
@@ -276,8 +259,6 @@ export async function scan(args: string[]): Promise<void> {
   let totalMessages = 0;
   let totalSwears = 0;
   const perAgent: Record<string, { messages: number; swears: number }> = {};
-  const costByAgent: Record<string, CostSummary> = {};
-  const costUnavailableAgents = new Set<string>();
 
   for (const adapter of adapters) {
     let agentMessages = 0;
@@ -302,15 +283,6 @@ export async function scan(args: string[]): Promise<void> {
       }
     }
 
-    if (options.cost && adapter.usage && pricing) {
-      const summary = await summarizeUsage(adapter.usage({ since: options.since }), pricing);
-      if (summary && summary.requests > 0) {
-        costByAgent[adapter.name] = summary;
-      }
-    } else if (options.cost && agentMessages > 0) {
-      costUnavailableAgents.add(adapter.name);
-    }
-
     if (agentMessages > 0) {
       perAgent[adapter.name] = { messages: agentMessages, swears: agentSwears };
     }
@@ -319,30 +291,10 @@ export async function scan(args: string[]): Promise<void> {
   spinner.stop();
 
   const activeAgents = Object.entries(perAgent);
-  const costTotals = options.cost ? getCostTotals(costByAgent) : null;
 
   console.log("");
   printReportHeader(options);
-
-  if (options.cost) {
-    if (!costTotals || costTotals.entries.length === 0) {
-      printBasicOverview(totalMessages, totalSwears);
-      console.log(`  ${c.dim}cost estimate${c.reset}     ${c.gray}unavailable${c.reset}`);
-      if (costUnavailableAgents.size > 0) {
-        console.log(
-          `  ${c.dim}cost unavailable${c.reset} ${Array.from(costUnavailableAgents).sort().join(", ")}`,
-        );
-      }
-    } else {
-      printCostOverview(costTotals, totalMessages, totalSwears, costUnavailableAgents);
-    }
-  } else {
-    printBasicOverview(totalMessages, totalSwears);
-  }
-
-  if (costTotals && costTotals.entries.length > 0) {
-    printCostDashboard(costTotals);
-  }
+  printBasicOverview(totalMessages, totalSwears);
 
   if (activeAgents.length > 1) {
     console.log("");
@@ -434,9 +386,6 @@ function printCompactHeader(options: ScanOptions): void {
 
 function compactMeta(totals: CostTotals): string {
   const parts = [formatRequests(totals.pricedRequests)];
-  if (shouldShowBilledCost(totals.totalCost, totals.totalBilled)) {
-    parts.push(`${formatCurrency(totals.totalBilled)} billed`);
-  }
   if (totals.unpricedRequests > 0) {
     parts.push(`${formatNumber(totals.unpricedRequests)} unpriced`);
   }
@@ -518,20 +467,17 @@ function costReportData(
       options.rangeLabel ??
       (options.since ? `since ${formatDate(options.since)}` : "all local history"),
     totalCost: totals.totalCost,
-    totalBilled: totals.totalBilled,
     pricedRequests: totals.pricedRequests,
     unpricedRequests: totals.unpricedRequests,
     agents: totals.entries
       .map(([name, summary]) => ({
         name,
         estimatedCost: summary.estimatedCost,
-        billedCost: summary.billedCost,
         requests: summary.requests - summary.unpricedRequests,
         models: summary.models.map(costReportModel),
         days: summary.days.map((day) => ({
           day: day.day,
           estimatedCost: day.estimatedCost,
-          billedCost: day.billedCost,
           requests: day.requests - day.unpricedRequests,
           models: day.models.map(costReportModel),
         })),
@@ -545,7 +491,6 @@ function costReportModel(model: CostModelSummary): CostReportModel {
     model: model.model,
     provider: model.provider,
     estimatedCost: model.estimatedCost,
-    billedCost: model.billedCost,
     requests: model.requests - model.unpricedRequests,
     inputTokens: model.inputTokens,
     outputTokens: model.outputTokens,
@@ -642,8 +587,8 @@ function renderCostHtmlReport(data: CostReportData): string {
     <section class="summary">
       <div class="card primary"><div class="label">total</div><div class="value" id="totalCost"></div></div>
       <div class="card"><div class="label">requests</div><div class="value" id="requestCount"></div></div>
-      <div class="card"><div class="label">billed</div><div class="value" id="billedCost"></div></div>
       <div class="card"><div class="label">models</div><div class="value" id="modelCount"></div></div>
+      <div class="card"><div class="label">agents</div><div class="value" id="agentCount"></div></div>
     </section>
     <section class="controls">
       <label>Agent<select id="agentFilter"></select></label>
@@ -651,7 +596,7 @@ function renderCostHtmlReport(data: CostReportData): string {
       <label>Range<select id="rangeFilter"><option value="all">All included data</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select></label>
     </section>
     <section class="grid">
-      <div class="panel"><h2>Agents</h2><div class="panel-body"><table><thead><tr><th>Agent</th><th>Cost</th><th>Reqs</th><th>Billed</th></tr></thead><tbody id="agentRows"></tbody></table></div></div>
+      <div class="panel"><h2>Agents</h2><div class="panel-body"><table><thead><tr><th>Agent</th><th>Cost</th><th>Reqs</th></tr></thead><tbody id="agentRows"></tbody></table></div></div>
       <div class="panel"><h2>Models</h2><div class="panel-body"><table><thead><tr><th>Model</th><th>Cost</th><th>Share</th><th>Reqs</th><th>Input</th><th>Output</th><th>Cache</th></tr></thead><tbody id="modelRows"></tbody></table><div class="legend"><span><i class="dot bg-purple"></i>Claude/Anthropic</span><span><i class="dot bg-green"></i>OpenAI</span><span><i class="dot bg-blue"></i>Google</span><span><i class="dot bg-yellow"></i>Kimi/GLM</span></div></div></div>
       <div class="panel"><h2>Daily</h2><div class="panel-body"><div class="chart-wrap"><div class="chart" id="dailyChart"></div><div class="axis" id="dailyAxis"></div></div></div></div>
     </section>
@@ -691,8 +636,8 @@ function renderCostHtmlReport(data: CostReportData): string {
     }
     function addModel(map, incoming) {
       const key = incoming.model;
-      const row = map.get(key) || {model: incoming.model, provider: incoming.provider, estimatedCost: 0, billedCost: 0, requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0};
-      row.estimatedCost += incoming.estimatedCost; row.billedCost += incoming.billedCost; row.requests += incoming.requests;
+      const row = map.get(key) || {model: incoming.model, provider: incoming.provider, estimatedCost: 0, requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0};
+      row.estimatedCost += incoming.estimatedCost; row.requests += incoming.requests;
       row.inputTokens += incoming.inputTokens; row.outputTokens += incoming.outputTokens; row.reasoningTokens += incoming.reasoningTokens;
       row.cacheReadTokens += incoming.cacheReadTokens; row.cacheWriteTokens += incoming.cacheWriteTokens;
       map.set(key, row);
@@ -715,31 +660,30 @@ function renderCostHtmlReport(data: CostReportData): string {
       const agents = filteredAgents();
       const modelMap = new Map();
       const dayMap = new Map();
-      let totalCost = 0, totalBilled = 0, requests = 0;
+      let totalCost = 0, requests = 0;
       for (const agent of agents) {
         const models = selectedModelRows(agent.models);
-        for (const model of models) { addModel(modelMap, model); totalCost += model.estimatedCost; totalBilled += model.billedCost; requests += model.requests; }
+        for (const model of models) { addModel(modelMap, model); totalCost += model.estimatedCost; requests += model.requests; }
         for (const day of agent.days) {
           if (!dayAllowed(day.day)) continue;
           const dayModels = selectedModelRows(day.models);
           const cost = dayModels.reduce((sum, model) => sum + model.estimatedCost, 0);
-          const billed = dayModels.reduce((sum, model) => sum + model.billedCost, 0);
           const reqs = dayModels.reduce((sum, model) => sum + model.requests, 0);
           if (cost <= 0 && reqs <= 0) continue;
-          const row = dayMap.get(day.day) || {day: day.day, estimatedCost: 0, billedCost: 0, requests: 0};
-          row.estimatedCost += cost; row.billedCost += billed; row.requests += reqs; dayMap.set(day.day, row);
+          const row = dayMap.get(day.day) || {day: day.day, estimatedCost: 0, requests: 0};
+          row.estimatedCost += cost; row.requests += reqs; dayMap.set(day.day, row);
         }
       }
-      return {agents, models: Array.from(modelMap.values()).sort((a,b) => b.estimatedCost - a.estimatedCost), days: Array.from(dayMap.values()).sort((a,b) => a.day.localeCompare(b.day)), totalCost, totalBilled, requests};
+      return {agents, models: Array.from(modelMap.values()).sort((a,b) => b.estimatedCost - a.estimatedCost), days: Array.from(dayMap.values()).sort((a,b) => a.day.localeCompare(b.day)), totalCost, requests};
     }
     function render() {
       const view = compute();
       $('totalCost').textContent = money(view.totalCost);
       $('requestCount').textContent = number(view.requests);
-      $('billedCost').textContent = money(view.totalBilled);
       $('modelCount').textContent = number(view.models.length);
-      const agentRows = view.agents.map((agent) => '<tr><td class="name">' + esc(agent.name) + '</td><td>' + money(agent.estimatedCost) + '</td><td>' + number(agent.requests) + '</td><td>' + money(agent.billedCost) + '</td></tr>').join('');
-      $('agentRows').innerHTML = agentRows || '<tr><td colspan="4" class="muted">No data</td></tr>';
+      $('agentCount').textContent = number(view.agents.length);
+      const agentRows = view.agents.map((agent) => '<tr><td class="name">' + esc(agent.name) + '</td><td>' + money(agent.estimatedCost) + '</td><td>' + number(agent.requests) + '</td></tr>').join('');
+      $('agentRows').innerHTML = agentRows || '<tr><td colspan="3" class="muted">No data</td></tr>';
       const maxModel = Math.max(1, ...view.models.map((model) => model.estimatedCost));
       $('modelRows').innerHTML = view.models.map((model) => {
         const klass = modelClass(model.model, model.provider);
@@ -802,8 +746,7 @@ function printReportHeader(options: ScanOptions): void {
     options.rangeLabel ??
     (options.since ? `since ${formatDate(options.since)}` : "all local history");
   const agent = options.agent ? ` · ${options.agent}` : "";
-  const title = options.costOnly ? "cost" : options.cost ? "cost report" : "report";
-  console.log(`  ${c.bold}${c.red}devrage${c.reset} ${c.dim}${title}${c.reset}`);
+  console.log(`  ${c.bold}${c.red}devrage${c.reset} ${c.dim}report${c.reset}`);
   console.log(`  ${c.dim}${scope}${agent}${c.reset}`);
   console.log(`  ${c.dim}${"─".repeat(54)}${c.reset}`);
 }
@@ -817,143 +760,19 @@ function printBasicOverview(totalMessages: number, totalSwears: number): void {
   );
 }
 
-function printCostOverview(
-  totals: CostTotals,
-  totalMessages: number,
-  totalSwears: number,
-  costUnavailableAgents: Set<string>,
-): void {
-  console.log(
-    `  ${c.bold}${c.green}${formatCurrency(totals.totalCost)}${c.reset} ${c.dim}estimated API-equivalent cost${c.reset}`,
-  );
-  console.log("");
-
-  const billedLabel =
-    totals.entries.length === 1 ? `${totals.entries[0]?.[0]} billed` : "stored billed";
-  console.log(`  ${overviewCell("messages scanned", formatNumber(totalMessages))}`);
-  console.log(`  ${overviewCell("total swears", formatNumber(totalSwears), c.red)}`);
-  console.log(`  ${overviewCell("priced requests", formatNumber(totals.pricedRequests))}`);
-  if (shouldShowBilledCost(totals.totalCost, totals.totalBilled)) {
-    console.log(`  ${overviewCell(billedLabel, formatCurrency(totals.totalBilled))}`);
-  }
-  if (totals.unpricedRequests > 0) {
-    console.log(`  ${overviewCell("unpriced requests", formatNumber(totals.unpricedRequests))}`);
-  }
-  if (costUnavailableAgents.size > 0) {
-    console.log(
-      `  ${c.dim}${"cost unavailable".padEnd(18)}${c.reset}${Array.from(costUnavailableAgents).sort().join(", ")}`,
-    );
-  }
-}
-
-function overviewCell(label: string, value: string, valueColor = c.bold): string {
-  return `${c.dim}${label.padEnd(18)}${c.reset}${valueColor}${value}${c.reset}`;
-}
-
 function getCostTotals(costByAgent: Record<string, CostSummary>): CostTotals {
   const entries = Object.entries(costByAgent);
   const totalCost = entries.reduce((sum, [, stats]) => sum + stats.estimatedCost, 0);
-  const totalBilled = entries.reduce((sum, [, stats]) => sum + stats.billedCost, 0);
   const totalRequests = entries.reduce((sum, [, stats]) => sum + stats.requests, 0);
   const unpricedRequests = entries.reduce((sum, [, stats]) => sum + stats.unpricedRequests, 0);
 
   return {
     entries,
     totalCost,
-    totalBilled,
     totalRequests,
     pricedRequests: totalRequests - unpricedRequests,
     unpricedRequests,
   };
-}
-
-function printCostDashboard(totals: CostTotals): void {
-  const modelTotals = aggregateModelCosts(totals.entries);
-  const dailyTotals = aggregateDailyCosts(totals.entries);
-
-  console.log("");
-  console.log(`  ${sectionTitle("cost dashboard")}`);
-  printModelMix(modelTotals, totals.totalCost);
-  printDailySpend(dailyTotals);
-
-  console.log("");
-  console.log(`  ${sectionTitle("agent cost")}`);
-  for (const [name, stats] of totals.entries) {
-    const color = agentColor(name);
-    console.log(
-      `    ${colorText(name.padEnd(10), color)} ${c.bold}${formatCurrency(stats.estimatedCost).padStart(8)}${c.reset} ${c.dim}in ${formatNumber(stats.requests)} requests${c.reset}`,
-    );
-    if (stats.pricing.source !== "catalog") {
-      const source =
-        stats.pricing.source === "stale-catalog" ? "stale models.dev cache" : "fallback rates";
-      console.log(`      ${c.dim}pricing:${c.reset} ${source}`);
-    }
-
-    for (const model of stats.models) {
-      const source = pricingSourceLabel(model.pricingSource);
-      const billed = shouldShowBilledCost(model.estimatedCost, model.billedCost)
-        ? ` ${c.dim}billed ${formatCurrency(model.billedCost)}${c.reset}`
-        : "";
-      console.log(
-        `      ${colorText(model.model.padEnd(22), modelColor(model))} ${formatCurrency(model.estimatedCost).padStart(8)} ${c.dim}${formatNumber(model.requests)} requests${source}${c.reset}${billed}`,
-      );
-    }
-
-    const unpriced = stats.models.filter((model) => model.unpricedRequests > 0);
-    if (unpriced.length > 0) {
-      const unpricedList = unpriced
-        .slice(0, 3)
-        .map((model) => `${model.model} ${formatNumber(model.unpricedRequests)}`)
-        .join(`${c.dim},${c.reset} `);
-      console.log(`      ${c.dim}unpriced:${c.reset} ${unpricedList}`);
-    }
-  }
-}
-
-function printModelMix(models: CostModelSummary[], totalCost: number): void {
-  if (models.length === 0) {
-    return;
-  }
-
-  const maxCost = models[0]?.estimatedCost ?? 0;
-  console.log(`    ${c.bold}model mix${c.reset}`);
-  console.log(
-    `      ${c.dim}${"model".padEnd(26)} ${"cost".padStart(9)} ${"share".padStart(6)} ${"requests".padStart(10)}  spend${c.reset}`,
-  );
-  for (const model of models) {
-    const share = totalCost > 0 ? model.estimatedCost / totalCost : 0;
-    const color = modelColor(model);
-    console.log(
-      `      ${colorText(clip(model.model, 26).padEnd(26), color)} ${formatCurrency(model.estimatedCost).padStart(9)} ${c.dim}${formatPercent(share).padStart(6)} ${formatNumber(model.requests).padStart(10)}${c.reset}  ${renderBar(model.estimatedCost, maxCost, 18, color)}`,
-    );
-  }
-}
-
-function printDailySpend(days: CostDaySummary[]): void {
-  const pricedDays = days.filter((day) => day.estimatedCost > 0);
-  if (pricedDays.length === 0) {
-    return;
-  }
-
-  const visibleDays = pricedDays.slice(-14);
-  const maxCost = Math.max(...visibleDays.map((day) => day.estimatedCost));
-  console.log("");
-  console.log(
-    `    ${c.bold}daily spend${c.reset} ${c.dim}(last ${visibleDays.length} active days)${c.reset}`,
-  );
-  console.log(
-    `      ${c.dim}${"date".padEnd(10)} ${"cost".padStart(9)}  spend${"".padEnd(15)} top model${c.reset}`,
-  );
-  for (const day of visibleDays) {
-    const topModel = day.models[0];
-    const color = topModel ? modelColor(topModel) : c.cyan;
-    const topModelText = topModel
-      ? `${topModel.model} ${formatCurrency(topModel.estimatedCost)}`
-      : `${formatNumber(day.requests)} reqs`;
-    console.log(
-      `      ${day.day} ${formatCurrency(day.estimatedCost).padStart(9)}  ${renderBar(day.estimatedCost, maxCost, 18, color)} ${c.dim}${clip(topModelText, 34)}${c.reset}`,
-    );
-  }
 }
 
 function aggregateModelCosts(entries: [string, CostSummary][]): CostModelSummary[] {
@@ -966,76 +785,6 @@ function aggregateModelCosts(entries: [string, CostSummary][]): CostModelSummary
   }
 
   return sortedCostModels(models);
-}
-
-interface DailyCostAccumulator {
-  day: string;
-  requests: number;
-  estimatedCost: number;
-  billedCost: number;
-  unpricedRequests: number;
-  inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  models: Map<string, CostModelSummary>;
-}
-
-function aggregateDailyCosts(entries: [string, CostSummary][]): CostDaySummary[] {
-  const days = new Map<string, DailyCostAccumulator>();
-
-  for (const [, stats] of entries) {
-    for (const day of stats.days) {
-      let bucket = days.get(day.day);
-      if (!bucket) {
-        bucket = {
-          day: day.day,
-          requests: 0,
-          estimatedCost: 0,
-          billedCost: 0,
-          unpricedRequests: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          reasoningTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          models: new Map(),
-        };
-        days.set(day.day, bucket);
-      }
-
-      bucket.requests += day.requests;
-      bucket.estimatedCost += day.estimatedCost;
-      bucket.billedCost += day.billedCost;
-      bucket.unpricedRequests += day.unpricedRequests;
-      bucket.inputTokens += day.inputTokens;
-      bucket.outputTokens += day.outputTokens;
-      bucket.reasoningTokens += day.reasoningTokens;
-      bucket.cacheReadTokens += day.cacheReadTokens;
-      bucket.cacheWriteTokens += day.cacheWriteTokens;
-
-      for (const model of day.models) {
-        mergeModelSummary(bucket.models, model);
-      }
-    }
-  }
-
-  return Array.from(days.values())
-    .sort((left, right) => left.day.localeCompare(right.day))
-    .map((day) => ({
-      day: day.day,
-      requests: day.requests,
-      estimatedCost: day.estimatedCost,
-      billedCost: day.billedCost,
-      unpricedRequests: day.unpricedRequests,
-      inputTokens: day.inputTokens,
-      outputTokens: day.outputTokens,
-      reasoningTokens: day.reasoningTokens,
-      cacheReadTokens: day.cacheReadTokens,
-      cacheWriteTokens: day.cacheWriteTokens,
-      models: sortedCostModels(day.models),
-    }));
 }
 
 function mergeModelSummary(
@@ -1150,27 +899,4 @@ function formatPercent(value: number): string {
 
 function formatDate(value: Date): string {
   return value.toISOString().slice(0, 10);
-}
-
-function shouldShowBilledCost(estimatedCost: number, billedCost: number): boolean {
-  return formatCurrency(estimatedCost) !== formatCurrency(billedCost);
-}
-
-function pricingSourceLabel(source: string): string {
-  switch (source) {
-    case "catalog":
-      return " catalog";
-    case "stale-catalog":
-      return " stale";
-    case "fallback":
-      return " fallback";
-    case "stored":
-      return " billed only";
-    case "unknown":
-      return " unpriced";
-    case "mixed":
-      return " mixed";
-    default:
-      return "";
-  }
 }
