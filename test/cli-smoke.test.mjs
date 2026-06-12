@@ -249,8 +249,45 @@ test("Claude cost uses assistant usage once per streamed request", async () => {
   assert.match(output, /claude-opus-4-7\s+\$36\.75/);
 });
 
-test("Codex cost uses cumulative token deltas without double-counting repeats", async () => {
+test("Codex cost uses last token usage and skips non-billable updates", async () => {
   const root = await mkdtemp(join(tmpdir(), "devrage-codex-"));
+  const cacheHome = join(root, "cache");
+  const sessionPath = join(root, ".codex", "sessions", "2026", "06", "02", "rollout-fixture.jsonl");
+
+  await mkdir(dirname(sessionPath), { recursive: true });
+  await writePricingCache(cacheHome);
+  const actualUsage = codexUsage();
+  const inflatedTotal = codexUsage({
+    input_tokens: 11_100_000,
+    cached_input_tokens: 10_100_000,
+    total_tokens: 12_100_000,
+  });
+  const lines = [
+    codexTurnContextLine(),
+    codexUserLine(),
+    codexTokenLine({ total: inflatedTotal, last: actualUsage }),
+    codexTokenLine({ total: inflatedTotal, last: actualUsage }),
+    codexTokenLine({
+      timestamp: "2026-06-02T00:00:03.000Z",
+      total: { total_tokens: 12_300_000 },
+      last: { total_tokens: 200_000 },
+    }),
+  ];
+  await writeFile(sessionPath, `${lines.join("\n")}\n`);
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "codex"], {
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+    }),
+  );
+
+  assert.match(output, /codex\s+\$35\.05\s+1 req/);
+  assert.match(output, /gpt-5\.5\s+\$35\.05/);
+});
+
+test("Codex cost falls back to cumulative totals without last usage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-codex-legacy-"));
   const cacheHome = join(root, "cache");
   const sessionPath = join(root, ".codex", "sessions", "2026", "06", "02", "rollout-fixture.jsonl");
 
@@ -258,7 +295,12 @@ test("Codex cost uses cumulative token deltas without double-counting repeats", 
   await writePricingCache(cacheHome);
   await writeFile(
     sessionPath,
-    `${codexTurnContextLine()}\n${codexUserLine()}\n${codexTokenLine()}\n${codexTokenLine()}\n`,
+    `${[
+      codexTurnContextLine(),
+      codexUserLine(),
+      codexTokenLine({ last: null }),
+      codexTokenLine({ last: null }),
+    ].join("\n")}\n`,
   );
 
   const output = stripAnsi(
@@ -488,21 +530,36 @@ function codexUserLine() {
   });
 }
 
-function codexTokenLine() {
+function codexUsage(overrides = {}) {
+  return {
+    input_tokens: 1_100_000,
+    cached_input_tokens: 100_000,
+    output_tokens: 1_000_000,
+    reasoning_output_tokens: 500_000,
+    total_tokens: 2_100_000,
+    ...overrides,
+  };
+}
+
+function codexTokenLine(options = {}) {
+  const timestamp = options.timestamp ?? "2026-06-02T00:00:02.000Z";
+  const total = Object.hasOwn(options, "total") ? options.total : codexUsage();
+  const last = Object.hasOwn(options, "last") ? options.last : codexUsage();
+  const info = {};
+
+  if (total !== null) {
+    info.total_token_usage = total;
+  }
+  if (last !== null) {
+    info.last_token_usage = last;
+  }
+
   return JSON.stringify({
-    timestamp: "2026-06-02T00:00:02.000Z",
+    timestamp,
     type: "event_msg",
     payload: {
       type: "token_count",
-      info: {
-        total_token_usage: {
-          input_tokens: 1_100_000,
-          cached_input_tokens: 100_000,
-          output_tokens: 1_000_000,
-          reasoning_output_tokens: 500_000,
-          total_tokens: 2_100_000,
-        },
-      },
+      info,
     },
   });
 }

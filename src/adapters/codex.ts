@@ -156,7 +156,7 @@ interface CodexTokenUsage {
   totalTokens: number;
 }
 
-/** Codex token_count events are cumulative; per-request records come from positive deltas. */
+/** Codex token_count events include both cumulative totals and the last completed response. */
 async function* parseCodexUsageJsonl(
   filePath: string,
   context: { session: string; since?: Date },
@@ -167,6 +167,7 @@ async function* parseCodexUsageJsonl(
   });
   let model: string | undefined;
   let previousTotal: CodexTokenUsage | null = null;
+  let previousUsageSignature: string | null = null;
 
   for await (const line of rl) {
     if (!line.trim()) {
@@ -187,14 +188,33 @@ async function* parseCodexUsageJsonl(
       }
 
       const info = asRecord(payload["info"]);
-      const total = parseCodexTokenUsage(info?.["total_token_usage"]);
-      if (!total) {
+      if (!info) {
         continue;
       }
 
-      const delta = previousTotal ? subtractCodexUsage(total, previousTotal) : total;
-      previousTotal = total;
-      if (!hasPositiveUsage(delta)) {
+      const lastUsageValue = info["last_token_usage"];
+      const lastUsage = parseCodexTokenUsage(lastUsageValue);
+      const total = parseCodexTokenUsage(info["total_token_usage"]);
+      let usage: CodexTokenUsage | null = null;
+
+      if (lastUsageValue !== undefined) {
+        if (lastUsage && hasBillableUsage(lastUsage)) {
+          const signature = codexUsageSignature(lastUsage, total);
+          if (signature !== previousUsageSignature) {
+            usage = lastUsage;
+          }
+          previousUsageSignature = signature;
+        }
+      } else if (total) {
+        const delta = previousTotal ? subtractCodexUsage(total, previousTotal) : total;
+        if (hasBillableUsage(delta)) {
+          usage = delta;
+        }
+      }
+      if (total && hasBillableUsage(total)) {
+        previousTotal = total;
+      }
+      if (!usage) {
         continue;
       }
 
@@ -206,17 +226,17 @@ async function* parseCodexUsageJsonl(
         }
       }
 
-      const reasoningTokens = Math.min(delta.reasoningOutputTokens, delta.outputTokens);
+      const reasoningTokens = Math.min(usage.reasoningOutputTokens, usage.outputTokens);
       yield {
         agent: "codex",
         provider: "openai",
         model,
         timestamp,
         session: context.session,
-        inputTokens: Math.max(delta.inputTokens - delta.cachedInputTokens, 0),
-        outputTokens: Math.max(delta.outputTokens - reasoningTokens, 0),
+        inputTokens: Math.max(usage.inputTokens - usage.cachedInputTokens, 0),
+        outputTokens: Math.max(usage.outputTokens - reasoningTokens, 0),
         reasoningTokens,
-        cacheReadTokens: delta.cachedInputTokens,
+        cacheReadTokens: usage.cachedInputTokens,
         cacheWriteTokens: 0,
       };
     } catch {
@@ -231,15 +251,24 @@ function parseCodexTokenUsage(value: unknown): CodexTokenUsage | null {
     return null;
   }
 
-  const parsed = {
+  const hasUsageField = [
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+  ].some((key) => typeof usage[key] === "number" && Number.isFinite(usage[key]));
+  if (!hasUsageField) {
+    return null;
+  }
+
+  return {
     inputTokens: numberValue(usage["input_tokens"]),
     cachedInputTokens: numberValue(usage["cached_input_tokens"]),
     outputTokens: numberValue(usage["output_tokens"]),
     reasoningOutputTokens: numberValue(usage["reasoning_output_tokens"]),
     totalTokens: numberValue(usage["total_tokens"]),
   };
-
-  return hasPositiveUsage(parsed) ? parsed : null;
 }
 
 function subtractCodexUsage(current: CodexTokenUsage, previous: CodexTokenUsage): CodexTokenUsage {
@@ -255,8 +284,24 @@ function subtractCodexUsage(current: CodexTokenUsage, previous: CodexTokenUsage)
   };
 }
 
-function hasPositiveUsage(usage: CodexTokenUsage): boolean {
-  return usage.inputTokens + usage.cachedInputTokens + usage.outputTokens + usage.totalTokens > 0;
+function hasBillableUsage(usage: CodexTokenUsage): boolean {
+  return (
+    usage.inputTokens + usage.cachedInputTokens + usage.outputTokens + usage.reasoningOutputTokens >
+    0
+  );
+}
+
+function codexUsageSignature(usage: CodexTokenUsage, total: CodexTokenUsage | null): string {
+  return [
+    usage.inputTokens,
+    usage.cachedInputTokens,
+    usage.outputTokens,
+    usage.reasoningOutputTokens,
+    total?.inputTokens ?? "",
+    total?.cachedInputTokens ?? "",
+    total?.outputTokens ?? "",
+    total?.reasoningOutputTokens ?? "",
+  ].join(":");
 }
 
 function numberValue(value: unknown): number {
