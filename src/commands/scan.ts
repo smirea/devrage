@@ -169,7 +169,7 @@ function parseArgs(args: string[]): ScanOptions {
       console.log(`devrage scan — scan sessions for profanity
 
 Options:
-  --agent, -a <name>   Scan only a specific agent (claude, codex, cursor, opencode, amp, cline, pi, zed)
+  --agent, -a <name>   Scan only a specific agent (claude, codex, cursor, opencode, amp, cline, pi, t3code, zed)
   --since, -s <date>   Only scan messages after this date (ISO 8601)
   --day, --days [n]    Only scan the last n days (default: 1)
   --week               Only scan the last 7 days
@@ -213,7 +213,7 @@ Usage:
   devrage cost [options]
 
 Options:
-  --agent, -a <name>   Show only a specific agent (claude, codex, cursor, opencode, amp, pi)
+  --agent, -a <name>   Show only a specific agent (claude, codex, cursor, opencode, amp, pi, t3code)
   --refresh-prices     Refresh models.dev pricing before estimating cost
   --since, -s <date>   Only include usage after this date (ISO 8601)
   --day, --days [n]    Only include the last n days (default: 1)

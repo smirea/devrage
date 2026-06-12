@@ -5,6 +5,7 @@ import { codexAdapter } from "./codex";
 import { cursorAdapter } from "./cursor";
 import { opencodeAdapter } from "./opencode";
 import { piAdapter } from "./pi";
+import { t3codeAdapter } from "./t3code";
 import { zedAdapter } from "./zed";
 
 export interface Message {
@@ -105,6 +106,7 @@ const ADAPTERS: Record<string, () => Adapter> = {
   amp: ampAdapter,
   cline: clineAdapter,
   pi: piAdapter,
+  t3code: t3codeAdapter,
   zed: zedAdapter,
 };
 

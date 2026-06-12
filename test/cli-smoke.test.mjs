@@ -523,6 +523,74 @@ test("Cursor cost reads modern bubble token usage when present", async () => {
   assert.match(output, /gpt-5\.5\s+\$35\.00/);
 });
 
+test("T3 Code scans projected messages and dedupes usage snapshots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-t3code-"));
+  const cacheHome = join(root, "cache");
+  const t3Home = join(root, "t3home");
+  const dbPath = join(t3Home, "userdata", "state.sqlite");
+
+  await mkdir(dirname(dbPath), { recursive: true });
+  await writePricingCache(cacheHome);
+  createT3CodeFixture(dbPath);
+
+  const scanOutput = stripAnsi(
+    await runCli(["scan", "--agent", "t3code", "--since", "2026-06-01"], {
+      HOME: root,
+      T3CODE_HOME: t3Home,
+    }),
+  );
+
+  assert.match(scanOutput, /messages scanned\s+1/);
+  assert.match(scanOutput, /total swears\s+2/);
+  assert.match(scanOutput, /fuck\s+1/);
+  assert.match(scanOutput, /crap\s+1/);
+
+  const costOutput = stripAnsi(
+    await runCli(["cost", "--agent", "t3code", "--since", "2026-06-01"], {
+      HOME: root,
+      T3CODE_HOME: t3Home,
+      XDG_CACHE_HOME: cacheHome,
+    }),
+  );
+
+  assert.match(costOutput, /t3code\s+\$35\.05\s+1 req/);
+  assert.match(costOutput, /gpt-5\.5\s+\$35\.05/);
+  assert.doesNotMatch(costOutput, /2 req/);
+  assert.doesNotMatch(costOutput, /\$70\.10/);
+});
+
+test("T3 Code cost maps Claude Code sessions to Anthropic pricing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-t3code-claude-"));
+  const cacheHome = join(root, "cache");
+  const t3Home = join(root, "t3home");
+  const dbPath = join(t3Home, "userdata", "state.sqlite");
+
+  await mkdir(dirname(dbPath), { recursive: true });
+  await writePricingCache(cacheHome, {}, { "claude-fixture": { cost: { input: 1, output: 2 } } });
+  createT3CodeFixture(dbPath, {
+    providerName: "claudeAgent",
+    instanceId: "claudeAgent",
+    model: "claude-fixture",
+    usage: {
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 1_000_000,
+      reasoningOutputTokens: 0,
+    },
+  });
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "t3code", "--since", "2026-06-01"], {
+      HOME: root,
+      T3CODE_HOME: t3Home,
+      XDG_CACHE_HOME: cacheHome,
+    }),
+  );
+
+  assert.match(output, /t3code\s+\$3\.00\s+1 req/);
+  assert.match(output, /claude-fixture\s+\$3\.00/);
+});
+
 async function runCli(args, env) {
   const result = await execFileAsync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
@@ -542,7 +610,7 @@ async function readReport(output) {
   return readFile(fileURLToPath(match[1]), "utf-8");
 }
 
-async function writePricingCache(cacheHome, extraOpenAiModels = {}) {
+async function writePricingCache(cacheHome, extraOpenAiModels = {}, extraAnthropicModels = {}) {
   const cacheDir = join(cacheHome, "devrage");
   await mkdir(cacheDir, { recursive: true });
   await writeFile(
@@ -563,6 +631,7 @@ async function writePricingCache(cacheHome, extraOpenAiModels = {}) {
             "claude-opus-4-7": {
               cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
             },
+            ...extraAnthropicModels,
           },
         },
       },
@@ -929,6 +998,148 @@ function createCursorCostFixture(dbPath) {
   } finally {
     db.close();
   }
+}
+
+function createT3CodeFixture(dbPath, options = {}) {
+  const model = options.model ?? "gpt-5.5";
+  const providerName = options.providerName ?? "codex";
+  const instanceId = options.instanceId ?? providerName;
+  const db = new Database(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE projection_thread_messages (
+        message_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT,
+        role TEXT NOT NULL,
+        text TEXT NOT NULL,
+        is_streaming INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE projection_threads (
+        thread_id TEXT PRIMARY KEY,
+        model_selection_json TEXT
+      );
+      CREATE TABLE projection_thread_sessions (
+        thread_id TEXT PRIMARY KEY,
+        provider_name TEXT
+      );
+      CREATE TABLE orchestration_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        aggregate_kind TEXT NOT NULL,
+        stream_id TEXT NOT NULL,
+        stream_version INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        command_id TEXT,
+        causation_event_id TEXT,
+        correlation_id TEXT,
+        actor_kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL
+      );
+    `);
+
+    db.prepare("INSERT INTO projection_thread_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+      "message-1",
+      "thread-1",
+      null,
+      "user",
+      "please fix this fuck crap",
+      0,
+      "2026-06-02T00:00:00.000Z",
+      "2026-06-02T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO projection_threads VALUES (?, ?)").run(
+      "thread-1",
+      JSON.stringify({ instanceId, model }),
+    );
+    db.prepare("INSERT INTO projection_thread_sessions VALUES (?, ?)").run("thread-1", providerName);
+
+    const insertEvent = db.prepare(`
+      INSERT INTO orchestration_events (
+        event_id,
+        aggregate_kind,
+        stream_id,
+        stream_version,
+        event_type,
+        occurred_at,
+        command_id,
+        causation_event_id,
+        correlation_id,
+        actor_kind,
+        payload_json,
+        metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const payload = t3UsagePayload("usage-1", options.usage);
+    insertEvent.run(
+      "event-usage-1",
+      "thread",
+      "thread-1",
+      0,
+      "thread.activity-appended",
+      "2026-06-02T00:00:01.000Z",
+      null,
+      null,
+      null,
+      "provider",
+      JSON.stringify(payload),
+      "{}",
+    );
+    insertEvent.run(
+      "event-usage-duplicate",
+      "thread",
+      "thread-1",
+      1,
+      "thread.activity-appended",
+      "2026-06-02T00:00:02.000Z",
+      null,
+      null,
+      null,
+      "provider",
+      JSON.stringify(t3UsagePayload("usage-duplicate", options.usage)),
+      "{}",
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function t3UsagePayload(activityId, usage = {}, options = {}) {
+  const inputTokens = usage.inputTokens ?? 1_100_000;
+  const cachedInputTokens = usage.cachedInputTokens ?? 100_000;
+  const outputTokens = usage.outputTokens ?? 1_000_000;
+  const reasoningOutputTokens = usage.reasoningOutputTokens ?? 0;
+  const usedTokens = inputTokens + outputTokens;
+  const turnId = options.turnId ?? "turn-1";
+  return {
+    threadId: "thread-1",
+    activity: {
+      id: activityId,
+      createdAt: "2026-06-02T00:00:01.000Z",
+      tone: "info",
+      kind: "context-window.updated",
+      summary: "Context window updated",
+      turnId,
+      payload: {
+        usedTokens,
+        totalProcessedTokens: usedTokens,
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        reasoningOutputTokens,
+        lastUsedTokens: usedTokens,
+        lastInputTokens: inputTokens,
+        lastCachedInputTokens: cachedInputTokens,
+        lastOutputTokens: outputTokens,
+        lastReasoningOutputTokens: reasoningOutputTokens,
+        compactsAutomatically: true,
+      },
+    },
+  };
 }
 
 function stripAnsi(value) {
