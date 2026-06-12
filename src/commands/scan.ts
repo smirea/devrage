@@ -41,32 +41,53 @@ const SPINNER_MESSAGES = [
   "Tabulating regrets",
 ];
 
+const COST_SPINNER_MESSAGES = [
+  "Loading price catalog",
+  "Reading local usage",
+  "Scanning transcript stores",
+  "Crunching token counts",
+  "Still working through local history",
+];
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function createSpinner(messages = SPINNER_MESSAGES) {
   let messageIdx = 0;
   let dotCount = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let messageOverride: string | null = null;
+
+  function render() {
+    dotCount = (dotCount + 1) % 4;
+    const msg = messageOverride ?? messages[messageIdx % messages.length];
+    const dots = ".".repeat(dotCount || 1);
+    process.stdout.write(`\r  ${c.dim}${msg}${dots}${c.reset}   `);
+  }
 
   return {
-    start() {
+    start(message?: string) {
       messageIdx = Math.floor(Math.random() * messages.length);
+      messageOverride = message ?? null;
+      render();
       timer = setInterval(() => {
-        dotCount = (dotCount + 1) % 4;
-        const msg = messages[messageIdx % messages.length];
-        const dots = ".".repeat(dotCount || 1);
-        process.stdout.write(`\r  ${c.dim}${msg}${dots}${c.reset}   `);
+        render();
       }, 300);
     },
-    update() {
-      messageIdx++;
+    update(message?: string) {
+      if (message) {
+        messageOverride = message;
+      } else {
+        messageOverride = null;
+        messageIdx++;
+      }
+      render();
     },
     stop() {
       if (timer) {
         clearInterval(timer);
         timer = null;
       }
-      process.stdout.write("\r" + " ".repeat(60) + "\r");
+      process.stdout.write("\r" + " ".repeat(80) + "\r");
     },
   };
 }
@@ -337,28 +358,44 @@ export async function cost(args: string[]): Promise<void> {
   const options = parseCostArgs(args);
   const adapters = options.agent ? [createAdapter(options.agent)] : allAdapters();
   const costByAgent: Record<string, CostSummary> = {};
+  const spinner = createSpinner(COST_SPINNER_MESSAGES);
+  let totals: CostTotals | null = null;
 
-  const pricing = await loadPricingCatalog({ refresh: options.refreshPrices });
-  for (const adapter of adapters) {
-    if (!adapter.usage) {
-      continue;
+  spinner.start("Loading price catalog");
+  try {
+    const pricing = await loadPricingCatalog({ refresh: options.refreshPrices });
+    for (const adapter of adapters) {
+      if (!adapter.usage) {
+        continue;
+      }
+
+      spinner.update(`Reading ${adapter.name} usage`);
+      const summary = await summarizeUsage(adapter.usage({ since: options.since }), pricing);
+      if (summary.requests > 0) {
+        costByAgent[adapter.name] = summary;
+      }
     }
 
-    const summary = await summarizeUsage(adapter.usage({ since: options.since }), pricing);
-    if (summary.requests > 0) {
-      costByAgent[adapter.name] = summary;
-    }
+    totals = getCostTotals(costByAgent);
+  } finally {
+    spinner.stop();
   }
 
-  const totals = getCostTotals(costByAgent);
-
-  console.log("");
-  if (totals.entries.length === 0) {
+  if (!totals || totals.entries.length === 0) {
+    console.log("");
     printCostCommandUnavailable(options);
     return;
   }
 
-  const reportUrl = await writeCostHtmlReport(totals, options);
+  spinner.start("Writing cost report");
+  let reportUrl: string;
+  try {
+    reportUrl = await writeCostHtmlReport(totals, options);
+  } finally {
+    spinner.stop();
+  }
+
+  console.log("");
   printCostCommand(totals, options, reportUrl);
 }
 
