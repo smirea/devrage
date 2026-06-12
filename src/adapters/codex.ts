@@ -29,11 +29,19 @@ export function codexAdapter(): Adapter {
       }
     },
     async *usage(options?: AdapterOptions): AsyncGenerator<UsageRecord> {
+      const seenUsage = new Set<string>();
       for await (const file of discoverCodexSessionFiles(CODEX_SESSIONS_DIR)) {
-        yield* parseCodexUsageJsonl(file.filePath, {
+        for await (const record of parseCodexUsageJsonl(file.filePath, {
           session: file.session,
           since: options?.since,
-        });
+        })) {
+          const key = codexUsageRecordKey(record);
+          if (seenUsage.has(key)) {
+            continue;
+          }
+          seenUsage.add(key);
+          yield record;
+        }
       }
     },
   };
@@ -56,9 +64,17 @@ async function* discoverCodexSessionFiles(
     if (entryStat.isDirectory()) {
       yield* discoverCodexSessionFiles(fullPath);
     } else if (entry.endsWith(".jsonl")) {
-      yield { filePath: fullPath, session: entry.replace(".jsonl", "") };
+      yield { filePath: fullPath, session: sessionFromRolloutFileName(entry) };
     }
   }
+}
+
+function sessionFromRolloutFileName(fileName: string): string {
+  return (
+    fileName.match(
+      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
+    )?.[1] ?? fileName.replace(".jsonl", "")
+  );
 }
 
 async function* parseCodexJsonl(
@@ -168,6 +184,8 @@ async function* parseCodexUsageJsonl(
   let model: string | undefined;
   let previousTotal: CodexTokenUsage | null = null;
   let previousUsageSignature: string | null = null;
+  let session = context.session;
+  let sawSessionMeta = false;
 
   for await (const line of rl) {
     if (!line.trim()) {
@@ -177,6 +195,15 @@ async function* parseCodexUsageJsonl(
     try {
       const entry = JSON.parse(line) as Record<string, unknown>;
       const payload = asRecord(entry["payload"]);
+
+      if (entry["type"] === "session_meta") {
+        const metaSession = stringValue(payload?.["id"]) ?? stringValue(entry["id"]);
+        if (metaSession && !sawSessionMeta) {
+          session = metaSession;
+          sawSessionMeta = true;
+        }
+        continue;
+      }
 
       if (entry["type"] === "turn_context") {
         model = stringValue(payload?.["model"]) ?? model;
@@ -232,7 +259,7 @@ async function* parseCodexUsageJsonl(
         provider: "openai",
         model,
         timestamp,
-        session: context.session,
+        session,
         inputTokens: Math.max(usage.inputTokens - usage.cachedInputTokens, 0),
         outputTokens: Math.max(usage.outputTokens - reasoningTokens, 0),
         reasoningTokens,
@@ -243,6 +270,20 @@ async function* parseCodexUsageJsonl(
       // Skip malformed lines
     }
   }
+}
+
+function codexUsageRecordKey(record: UsageRecord): string {
+  return JSON.stringify([
+    record.session ?? "",
+    record.timestamp ?? "",
+    record.provider ?? "",
+    record.model ?? "",
+    record.inputTokens,
+    record.outputTokens,
+    record.reasoningTokens,
+    record.cacheReadTokens,
+    record.cacheWriteTokens,
+  ]);
 }
 
 function parseCodexTokenUsage(value: unknown): CodexTokenUsage | null {

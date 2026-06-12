@@ -335,6 +335,44 @@ test("Codex cost uses last token usage and skips non-billable updates", async ()
   assert.match(output, /gpt-5\.5\s+\$35\.05/);
 });
 
+test("Codex cost dedupes duplicate rollout files with the same session id", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-codex-rollbacks-"));
+  const cacheHome = join(root, "cache");
+  const sessionDir = join(root, ".codex", "sessions", "2026", "06", "02");
+  const firstPath = join(
+    sessionDir,
+    "rollout-2026-06-02T00-00-00-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl",
+  );
+  const secondPath = join(
+    sessionDir,
+    "rollout-2026-06-02T00-00-03-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl",
+  );
+  const sessionId = "11111111-1111-1111-1111-111111111111";
+  const lines = [
+    codexSessionMetaLine(sessionId),
+    codexTurnContextLine(),
+    codexUserLine(),
+    codexTokenLine(),
+  ];
+
+  await mkdir(sessionDir, { recursive: true });
+  await writePricingCache(cacheHome);
+  await writeFile(firstPath, `${lines.join("\n")}\n`);
+  await writeFile(secondPath, `${lines.join("\n")}\n`);
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "codex"], {
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+    }),
+  );
+
+  assert.match(output, /codex\s+\$35\.05\s+1 req/);
+  assert.match(output, /gpt-5\.5\s+\$35\.05/);
+  assert.doesNotMatch(output, /\$70\.10/);
+  assert.doesNotMatch(output, /2 req/);
+});
+
 test("Codex cost falls back to cumulative totals without last usage", async () => {
   const root = await mkdtemp(join(tmpdir(), "devrage-codex-legacy-"));
   const cacheHome = join(root, "cache");
@@ -564,6 +602,22 @@ function codexTurnContextLine() {
     timestamp: "2026-06-02T00:00:00.000Z",
     type: "turn_context",
     payload: { model: "gpt-5.5" },
+  });
+}
+
+function codexSessionMetaLine(id) {
+  return JSON.stringify({
+    timestamp: "2026-06-02T00:00:00.000Z",
+    type: "session_meta",
+    payload: {
+      id,
+      timestamp: "2026-06-02T00:00:00.000Z",
+      cwd: "/fixture",
+      originator: "codex-tui",
+      cli_version: "0.120.0",
+      source: "cli",
+      model_provider: "openai",
+    },
   });
 }
 
