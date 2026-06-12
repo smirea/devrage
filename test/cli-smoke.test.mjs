@@ -744,7 +744,11 @@ function createCursorPromptFixture(dbPath, text) {
 function createCursorCostFixture(dbPath) {
   const db = new Database(dbPath);
   try {
-    db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)");
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT, value BLOB)");
+    db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+      null,
+      JSON.stringify({ ignored: true }),
+    );
     db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
       "composerData:composer-1",
       JSON.stringify({

@@ -234,8 +234,15 @@ function readStateRows(db: import("better-sqlite3").Database): StateRow[] {
         continue;
       }
 
-      const tableRows = db.prepare(`SELECT key, value FROM "${table}"`).all() as StateRow[];
-      rows.push(...tableRows);
+      const tableRows = db.prepare(`SELECT key, value FROM "${table}"`).all() as {
+        key: unknown;
+        value: unknown;
+      }[];
+      rows.push(
+        ...tableRows.flatMap((row) =>
+          typeof row.key === "string" ? [{ key: row.key, value: row.value }] : [],
+        ),
+      );
     }
   } catch {
     return rows;
