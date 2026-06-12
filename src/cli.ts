@@ -5,6 +5,13 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   scan,
 };
 
+const OPTIONS_WITH_VALUES = new Set(["--agent", "-a", "--since", "-s"]);
+
+interface ParsedCommand {
+  handler: (args: string[]) => Promise<void>;
+  args: string[];
+}
+
 function usage(): void {
   console.log(`devrage — count how many times you swear at your coding agents
 
@@ -36,18 +43,41 @@ async function main(): Promise<void> {
   }
 
   if (command === "--version") {
-    console.log("0.5.2");
+    console.log("0.5.3");
     process.exit(0);
   }
 
-  // If no command or not a known command, default to scan
-  const handler = command ? COMMANDS[command] : undefined;
-  if (handler) {
-    await handler(args.slice(1));
+  // If no command is present, default to scan for the original no-subcommand UX.
+  const parsed = parseCommand(args);
+  if (parsed) {
+    await parsed.handler(parsed.args);
   } else {
     // Pass all args through to scan (covers both no-arg and unknown-arg cases)
     await scan(args);
   }
+}
+
+function parseCommand(args: string[]): ParsedCommand | null {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    const handler = COMMANDS[arg];
+    if (handler) {
+      return {
+        handler,
+        args: [...args.slice(0, index), ...args.slice(index + 1)],
+      };
+    }
+
+    if (OPTIONS_WITH_VALUES.has(arg) && index + 1 < args.length) {
+      index++;
+    }
+  }
+
+  return null;
 }
 
 main().catch((err: unknown) => {

@@ -89,6 +89,55 @@ test("cost command renders only the cost dashboard", async () => {
   assert.ok(report.indexOf("<h2>Models</h2>") < report.indexOf("<h2>Daily</h2>"));
 });
 
+test("cost command has a cost-specific empty state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-cost-empty-"));
+  const cacheHome = join(root, "cache");
+
+  await writePricingCache(cacheHome);
+
+  const output = stripAnsi(
+    await runCli(["cost", "--agent", "cursor"], {
+      APPDATA: join(root, "appdata"),
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+      XDG_CONFIG_HOME: join(root, "config"),
+      XDG_DATA_HOME: join(root, "data"),
+    }),
+  );
+
+  assert.match(output, /devrage cost/);
+  assert.match(output, /cursor/);
+  assert.match(output, /no local usage found/);
+  assert.doesNotMatch(output, /devrage report/);
+  assert.doesNotMatch(output, /messages scanned/);
+  assert.doesNotMatch(output, /total swears/);
+  assert.doesNotMatch(output, /squeaky clean/);
+});
+
+test("cost command works when flags come before the subcommand", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devrage-cost-before-flags-"));
+  const cacheHome = join(root, "cache");
+
+  await writePricingCache(cacheHome);
+
+  const output = stripAnsi(
+    await runCli(["--agent", "cursor", "cost"], {
+      APPDATA: join(root, "appdata"),
+      HOME: root,
+      XDG_CACHE_HOME: cacheHome,
+      XDG_CONFIG_HOME: join(root, "config"),
+      XDG_DATA_HOME: join(root, "data"),
+    }),
+  );
+
+  assert.match(output, /devrage cost/);
+  assert.match(output, /cursor/);
+  assert.match(output, /no local usage found/);
+  assert.doesNotMatch(output, /devrage report/);
+  assert.doesNotMatch(output, /messages scanned/);
+  assert.doesNotMatch(output, /squeaky clean/);
+});
+
 test("cost command caps terminal models to top 10", async () => {
   const root = await mkdtemp(join(tmpdir(), "devrage-cost-model-cap-"));
   const dataHome = join(root, "data");
