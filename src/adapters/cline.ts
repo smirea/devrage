@@ -32,13 +32,17 @@ function getClineTaskDirs(): string[] {
   for (const basePath of vscodePaths) {
     for (const extId of extensionIds) {
       const tasksDir = join(basePath, extId, "tasks");
-      if (existsSync(tasksDir)) dirs.push(tasksDir);
+      if (existsSync(tasksDir)) {
+        dirs.push(tasksDir);
+      }
     }
   }
 
   // Standalone CLI path
   const clineStandalone = join(homedir(), ".cline", "data", "tasks");
-  if (existsSync(clineStandalone)) dirs.push(clineStandalone);
+  if (existsSync(clineStandalone)) {
+    dirs.push(clineStandalone);
+  }
 
   return dirs;
 }
@@ -89,7 +93,9 @@ export function clineAdapter(): Adapter {
         for (const taskId of taskIds) {
           const taskDir = join(tasksDir, taskId);
           const taskStat = await stat(taskDir).catch(() => null);
-          if (!taskStat?.isDirectory()) continue;
+          if (!taskStat?.isDirectory()) {
+            continue;
+          }
 
           const historyFile = join(taskDir, "api_conversation_history.json");
 
@@ -97,20 +103,28 @@ export function clineAdapter(): Adapter {
             const raw = await readFile(historyFile, "utf-8");
             const messages = JSON.parse(raw) as ClineMessage[];
 
-            if (!Array.isArray(messages)) continue;
+            if (!Array.isArray(messages)) {
+              continue;
+            }
 
             for (const msg of messages) {
-              if (msg.role !== "user") continue;
+              if (msg.role !== "user") {
+                continue;
+              }
 
               const text = extractText(msg.content);
-              if (!text) continue;
+              if (!text) {
+                continue;
+              }
 
               // Cline doesn't store per-message timestamps in the conversation file
               // Use the task metadata file for approximate timing
               const timestamp = msg.ts ?? undefined;
               if (options?.since && timestamp) {
                 const ts = new Date(timestamp);
-                if (ts < options.since) continue;
+                if (ts < options.since) {
+                  continue;
+                }
               }
 
               yield {
@@ -128,15 +142,14 @@ export function clineAdapter(): Adapter {
 }
 
 function extractText(content: unknown): string | null {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") {
+    return content;
+  }
   if (Array.isArray(content)) {
     const parts = content
       .filter(
         (p): p is { type: string; text: string } =>
-          typeof p === "object" &&
-          p !== null &&
-          p.type === "text" &&
-          typeof p.text === "string",
+          typeof p === "object" && p !== null && p.type === "text" && typeof p.text === "string",
       )
       .map((p) => p.text);
     return parts.length > 0 ? parts.join(" ") : null;

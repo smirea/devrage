@@ -30,10 +30,7 @@ function getZedPaths(): { conversations: string; db: string } {
     };
   }
   // Linux / others
-  const base = join(
-    process.env["XDG_DATA_HOME"] ?? join(homedir(), ".local", "share"),
-    "zed",
-  );
+  const base = join(process.env["XDG_DATA_HOME"] ?? join(homedir(), ".local", "share"), "zed");
   return {
     conversations: join(base, "conversations"),
     db: join(base, "db"),
@@ -55,11 +52,10 @@ export function zedAdapter(): Adapter {
   };
 }
 
-async function* parseTextThreads(
-  dir: string,
-  _options?: AdapterOptions,
-): AsyncGenerator<Message> {
-  if (!existsSync(dir)) return;
+async function* parseTextThreads(dir: string, _options?: AdapterOptions): AsyncGenerator<Message> {
+  if (!existsSync(dir)) {
+    return;
+  }
 
   let files: string[];
   try {
@@ -78,13 +74,19 @@ async function* parseTextThreads(
       const raw = await readFile(filePath, "utf-8");
       const conversation = JSON.parse(raw) as ZedConversation;
 
-      if (!conversation.messages || !Array.isArray(conversation.messages)) continue;
+      if (!conversation.messages || !Array.isArray(conversation.messages)) {
+        continue;
+      }
 
       for (const msg of conversation.messages) {
-        if (msg.role !== "user") continue;
+        if (msg.role !== "user") {
+          continue;
+        }
 
         const text = typeof msg.content === "string" ? msg.content : null;
-        if (!text) continue;
+        if (!text) {
+          continue;
+        }
 
         yield {
           text,
@@ -103,7 +105,9 @@ async function* parseAgentThreads(
 ): AsyncGenerator<Message> {
   // Zed uses a directory of SQLite databases. The main one is typically
   // a file like 0-dev.db or similar inside the db/ directory.
-  if (!existsSync(dbDir)) return;
+  if (!existsSync(dbDir)) {
+    return;
+  }
 
   let dbFiles: string[];
   try {
@@ -113,7 +117,9 @@ async function* parseAgentThreads(
     return;
   }
 
-  if (dbFiles.length === 0) return;
+  if (dbFiles.length === 0) {
+    return;
+  }
 
   let Database: unknown;
   try {
@@ -128,19 +134,18 @@ async function* parseAgentThreads(
     let db: import("better-sqlite3").Database;
 
     try {
-      db = new (Database as new (...args: unknown[]) => import("better-sqlite3").Database)(
-        dbPath,
-        { readonly: true },
-      );
+      db = new (Database as new (...args: unknown[]) => import("better-sqlite3").Database)(dbPath, {
+        readonly: true,
+      });
     } catch {
       continue; // Can't open this DB
     }
 
     try {
       // Check if this DB has a threads/messages table
-      const tables = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
-        .all() as { name: string }[];
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+        name: string;
+      }[];
       const tableNames = tables.map((t) => t.name);
 
       // Look for message-like tables (Zed's schema may vary by version)
@@ -175,7 +180,9 @@ async function* parseAgentThreads(
 
       const rows = db.prepare(query).all() as { text: string }[];
       for (const row of rows) {
-        if (!row.text?.trim()) continue;
+        if (!row.text?.trim()) {
+          continue;
+        }
         yield { text: row.text };
       }
     } catch {

@@ -213,11 +213,15 @@ function runPattern(
 
   let match: RegExpExecArray | null;
   while ((match = DEFAULT_PATTERN.exec(searchText)) !== null) {
-    if (seen.has(match.index)) continue;
+    if (seen.has(match.index)) {
+      continue;
+    }
 
     const word = match[0].toLowerCase();
     const entry = WORD_MAP.get(word);
-    if (!entry) continue;
+    if (!entry) {
+      continue;
+    }
 
     seen.add(match.index);
     matches.push({
@@ -232,9 +236,7 @@ function runPattern(
 /**
  * Create a custom detector with additional words.
  */
-export function createDetector(
-  extraWords?: WordDef[],
-): (text: string) => DetectionResult {
+export function createDetector(extraWords?: WordDef[]): (text: string) => DetectionResult {
   const allWords = extraWords ? [...WORDLIST, ...extraWords] : WORDLIST;
   const pattern = buildPattern(allWords);
   const wordMap = new Map(allWords.map((w) => [w.word.toLowerCase(), w]));
@@ -247,10 +249,14 @@ export function createDetector(
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(lower)) !== null) {
-      if (seen.has(match.index)) continue;
+      if (seen.has(match.index)) {
+        continue;
+      }
       const word = match[0].toLowerCase();
       const entry = wordMap.get(word);
-      if (!entry) continue;
+      if (!entry) {
+        continue;
+      }
       seen.add(match.index);
       matches.push({ word, index: match.index, severity: entry.severity, group: entry.group });
     }
@@ -259,10 +265,14 @@ export function createDetector(
     if (collapsed !== lower) {
       pattern.lastIndex = 0;
       while ((match = pattern.exec(collapsed)) !== null) {
-        if (seen.has(match.index)) continue;
+        if (seen.has(match.index)) {
+          continue;
+        }
         const word = match[0].toLowerCase();
         const entry = wordMap.get(word);
-        if (!entry) continue;
+        if (!entry) {
+          continue;
+        }
         seen.add(match.index);
         matches.push({ word, index: match.index, severity: entry.severity, group: entry.group });
       }

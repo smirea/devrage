@@ -42,7 +42,9 @@ async function* walkPiSessions(
   for (const entry of entries) {
     const fullPath = join(dir, entry);
     const entryStat = await stat(fullPath).catch(() => null);
-    if (!entryStat) continue;
+    if (!entryStat) {
+      continue;
+    }
 
     if (entryStat.isDirectory()) {
       yield* walkPiSessions(fullPath, options, project ?? entry);
@@ -65,7 +67,9 @@ async function* parsePiJsonl(
   let project = context.project;
 
   for await (const line of rl) {
-    if (!line.trim()) continue;
+    if (!line.trim()) {
+      continue;
+    }
 
     try {
       const entry = JSON.parse(line) as PiEntry;
@@ -76,13 +80,19 @@ async function* parsePiJsonl(
         continue;
       }
 
-      if (entry.type !== "message") continue;
+      if (entry.type !== "message") {
+        continue;
+      }
 
       const message = entry.message;
-      if (!message || message.role !== "user") continue;
+      if (!message || message.role !== "user") {
+        continue;
+      }
 
       const text = contentToString(message.content);
-      if (!text) continue;
+      if (!text) {
+        continue;
+      }
 
       const timestamp =
         typeof entry.timestamp === "string"
@@ -93,7 +103,9 @@ async function* parsePiJsonl(
 
       if (context.since && timestamp) {
         const ts = new Date(timestamp);
-        if (ts < context.since) continue;
+        if (ts < context.since) {
+          continue;
+        }
       }
 
       yield {
@@ -109,15 +121,14 @@ async function* parsePiJsonl(
 }
 
 function contentToString(content: unknown): string | null {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") {
+    return content;
+  }
   if (Array.isArray(content)) {
     const parts = content
       .filter(
         (p): p is { type: string; text: string } =>
-          typeof p === "object" &&
-          p !== null &&
-          p.type === "text" &&
-          typeof p.text === "string",
+          typeof p === "object" && p !== null && p.type === "text" && typeof p.text === "string",
       )
       .map((p) => p.text);
     return parts.length > 0 ? parts.join(" ") : null;

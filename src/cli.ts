@@ -1,6 +1,7 @@
-import { scan } from "./commands/scan";
+import { cost, scan } from "./commands/scan";
 
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
+  cost,
   scan,
 };
 
@@ -11,6 +12,7 @@ Usage:
   devrage <command> [options]
 
 Commands:
+  cost          Show API-equivalent coding agent cost
   scan          Scan sessions for profanity
 
 Options:
@@ -18,6 +20,7 @@ Options:
   --version     Show version
 
 Examples:
+  devrage cost
   devrage scan
   devrage scan --agent claude
   devrage scan --since 2025-01-01`);

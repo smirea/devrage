@@ -1,0 +1,470 @@
+import { existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { Adapter, AdapterOptions, Message } from "./index";
+
+/**
+ * Reads Cursor's VS Code-style state stores read-only. Extraction is limited to
+ * known AI keys and confident user-authored message shapes; unreadable DBs skip.
+ */
+
+const CANDIDATE_KEY_PREFIXES = [
+  "composer.composerData",
+  "aiService.prompts",
+  "aiService.generations",
+  "workbench.panel.composerChatViewPane.",
+];
+
+const STATE_TABLES = ["ItemTable", "cursorDiskKV"];
+
+interface CursorStateStore {
+  path: string;
+  scope: string;
+  project?: string;
+}
+
+interface StateRow {
+  key: string;
+  value: unknown;
+}
+
+interface ExtractedMessage {
+  text: string;
+  timestamp?: string;
+  session?: string;
+}
+
+export function cursorAdapter(): Adapter {
+  return {
+    name: "cursor",
+    async *messages(options?: AdapterOptions): AsyncGenerator<Message> {
+      const stores = await discoverCursorStateStores();
+
+      for (const store of stores) {
+        yield* parseCursorStore(store, options);
+      }
+    },
+  };
+}
+
+async function discoverCursorStateStores(): Promise<CursorStateStore[]> {
+  const userDir = getCursorUserDir();
+  if (!existsSync(userDir)) {
+    return [];
+  }
+
+  const stores: CursorStateStore[] = [];
+  const globalState = join(userDir, "globalStorage", "state.vscdb");
+  if (existsSync(globalState)) {
+    stores.push({ path: globalState, scope: "global" });
+  }
+
+  const workspaceRoot = join(userDir, "workspaceStorage");
+  let workspaceIds: string[] = [];
+  try {
+    workspaceIds = await readdir(workspaceRoot);
+  } catch {
+    return stores;
+  }
+
+  for (const workspaceId of workspaceIds) {
+    const statePath = join(workspaceRoot, workspaceId, "state.vscdb");
+    if (existsSync(statePath)) {
+      stores.push({ path: statePath, scope: "workspace", project: workspaceId });
+    }
+  }
+
+  return stores;
+}
+
+function getCursorUserDir(): string {
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "Cursor", "User");
+  }
+
+  if (process.platform === "win32") {
+    const appData = process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming");
+    return join(appData, "Cursor", "User");
+  }
+
+  return join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "Cursor", "User");
+}
+
+async function* parseCursorStore(
+  store: CursorStateStore,
+  options?: AdapterOptions,
+): AsyncGenerator<Message> {
+  const db = await openCursorDb(store.path);
+  if (!db) {
+    return;
+  }
+
+  try {
+    const rows = readStateRows(db);
+    const seen = new Set<string>();
+
+    for (const row of rows) {
+      if (!isCandidateKey(row.key)) {
+        continue;
+      }
+
+      const parsed = parseJsonValue(row.value);
+      if (parsed === undefined) {
+        continue;
+      }
+
+      for (const message of extractCursorMessages(parsed, row.key)) {
+        const text = message.text.trim();
+        if (!isLikelyMessageText(text)) {
+          continue;
+        }
+
+        if (options?.since && message.timestamp) {
+          const timestamp = new Date(message.timestamp);
+          if (Number.isFinite(timestamp.getTime()) && timestamp < options.since) {
+            continue;
+          }
+        }
+
+        const session = message.session ?? `${store.scope}:${row.key}`;
+        const dedupeKey = `${session}\u0000${message.timestamp ?? ""}\u0000${text}`;
+        if (seen.has(dedupeKey)) {
+          continue;
+        }
+        seen.add(dedupeKey);
+
+        yield {
+          text,
+          timestamp: message.timestamp,
+          session,
+          project: store.project,
+        };
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+async function openCursorDb(dbPath: string): Promise<import("better-sqlite3").Database | null> {
+  try {
+    const BetterSqlite3 = await import("better-sqlite3");
+    const Ctor = BetterSqlite3.default ?? BetterSqlite3;
+    return new (Ctor as unknown as new (...args: unknown[]) => import("better-sqlite3").Database)(
+      dbPath,
+      { readonly: true },
+    );
+  } catch {
+    return null;
+  }
+}
+
+function readStateRows(db: import("better-sqlite3").Database): StateRow[] {
+  const rows: StateRow[] = [];
+
+  try {
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+      name: string;
+    }[];
+    const availableTables = new Set(tables.map((table) => table.name));
+
+    for (const table of STATE_TABLES) {
+      if (!availableTables.has(table)) {
+        continue;
+      }
+
+      const columns = db.prepare(`PRAGMA table_info("${table}")`).all() as { name: string }[];
+      const columnNames = new Set(columns.map((column) => column.name));
+      if (!columnNames.has("key") || !columnNames.has("value")) {
+        continue;
+      }
+
+      const tableRows = db.prepare(`SELECT key, value FROM "${table}"`).all() as StateRow[];
+      rows.push(...tableRows);
+    }
+  } catch {
+    return rows;
+  }
+
+  return rows;
+}
+
+function isCandidateKey(key: string): boolean {
+  return CANDIDATE_KEY_PREFIXES.some((prefix) => key === prefix || key.startsWith(prefix));
+}
+
+function parseJsonValue(value: unknown): unknown | undefined {
+  const raw = decodeStateValue(value);
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "string") {
+      return parsed;
+    }
+
+    const trimmed = parsed.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      return parsed;
+    }
+
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      return parsed;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeStateValue(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf-8");
+  }
+
+  return null;
+}
+
+function extractCursorMessages(root: unknown, rowKey: string): ExtractedMessage[] {
+  const messages: ExtractedMessage[] = [];
+  collectRoleMessages(root, messages);
+
+  if (rowKey.startsWith("aiService.prompts") || rowKey.startsWith("aiService.generations")) {
+    collectPromptMessages(root, messages);
+  }
+
+  return uniqueMessages(messages);
+}
+
+function collectRoleMessages(
+  value: unknown,
+  messages: ExtractedMessage[],
+  inheritedSession?: string,
+  depth = 0,
+): void {
+  if (depth > 12) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectRoleMessages(item, messages, inheritedSession, depth + 1);
+    }
+    return;
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return;
+  }
+
+  const session = extractSession(record) ?? inheritedSession;
+  if (isUserAuthored(record)) {
+    const text = extractMessageText(record);
+    if (text) {
+      messages.push({ text, timestamp: extractTimestamp(record), session });
+    }
+  }
+
+  for (const child of Object.values(record)) {
+    if (typeof child === "object" && child !== null) {
+      collectRoleMessages(child, messages, session, depth + 1);
+    }
+  }
+}
+
+function collectPromptMessages(
+  value: unknown,
+  messages: ExtractedMessage[],
+  inheritedSession?: string,
+  depth = 0,
+): void {
+  if (depth > 12) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    messages.push({ text: value, session: inheritedSession });
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectPromptMessages(item, messages, inheritedSession, depth + 1);
+    }
+    return;
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return;
+  }
+
+  const session = extractSession(record) ?? inheritedSession;
+  const prompt = firstTextField(record, [
+    "prompt",
+    "userPrompt",
+    "originalPrompt",
+    "currentPrompt",
+    "query",
+    "input",
+  ]);
+
+  if (prompt && !isAssistantAuthored(record)) {
+    messages.push({ text: prompt, timestamp: extractTimestamp(record), session });
+  }
+
+  for (const child of Object.values(record)) {
+    if (typeof child === "object" && child !== null) {
+      collectPromptMessages(child, messages, session, depth + 1);
+    }
+  }
+}
+
+function isUserAuthored(record: Record<string, unknown>): boolean {
+  return ["role", "speaker", "sender", "author", "source", "from", "type", "kind"].some((field) =>
+    actorIsUser(record[field]),
+  );
+}
+
+function isAssistantAuthored(record: Record<string, unknown>): boolean {
+  return ["role", "speaker", "sender", "author", "source", "from", "type", "kind"].some((field) =>
+    actorIsAssistant(record[field]),
+  );
+}
+
+function actorIsUser(value: unknown): boolean {
+  const actor = actorString(value);
+  return actor === "user" || actor === "human" || actor === "usermessage";
+}
+
+function actorIsAssistant(value: unknown): boolean {
+  const actor = actorString(value);
+  return actor === "assistant" || actor === "ai" || actor === "assistantmessage";
+}
+
+function actorString(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.toLowerCase().replace(/[^a-z]/g, "");
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  for (const field of ["role", "type", "name"]) {
+    if (typeof record[field] === "string") {
+      return record[field].toLowerCase().replace(/[^a-z]/g, "");
+    }
+  }
+
+  return null;
+}
+
+function extractMessageText(record: Record<string, unknown>): string | null {
+  return firstTextField(record, ["text", "content", "message", "prompt", "query", "input"]);
+}
+
+function firstTextField(record: Record<string, unknown>, fields: string[]): string | null {
+  for (const field of fields) {
+    const text = contentToText(record[field]);
+    if (text) {
+      return text;
+    }
+  }
+
+  return null;
+}
+
+function contentToText(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value.map(contentToText).filter((part): part is string => Boolean(part));
+    return parts.length > 0 ? parts.join(" ") : null;
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  return firstTextField(record, ["text", "content", "message", "value"]);
+}
+
+function extractTimestamp(record: Record<string, unknown>): string | undefined {
+  for (const field of ["timestamp", "createdAt", "updatedAt", "time", "created", "date", "ts"]) {
+    const timestamp = normalizeTimestamp(record[field]);
+    if (timestamp) {
+      return timestamp;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeTimestamp(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value > 1_000_000_000_000 ? value : value * 1000;
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+  }
+
+  return undefined;
+}
+
+function extractSession(record: Record<string, unknown>): string | undefined {
+  for (const field of ["conversationId", "composerId", "sessionId", "chatId", "threadId", "id"]) {
+    const value = record[field];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function isLikelyMessageText(text: string): boolean {
+  return text.length > 0 && !text.startsWith("<environment_context>");
+}
+
+function uniqueMessages(messages: ExtractedMessage[]): ExtractedMessage[] {
+  const seen = new Set<string>();
+  const unique: ExtractedMessage[] = [];
+
+  for (const message of messages) {
+    const key = `${message.session ?? ""}\u0000${message.timestamp ?? ""}\u0000${message.text}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(message);
+  }
+
+  return unique;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
