@@ -176,7 +176,7 @@ async function* parseAgentThreads(
           ? "body"
           : "text";
 
-      let query = `SELECT "${contentCol}" as text FROM "${msgTable}" WHERE role = 'user'`;
+      const query = `SELECT "${contentCol}" as text FROM "${msgTable}" WHERE role = 'user'`;
 
       const rows = db.prepare(query).all() as { text: string }[];
       for (const row of rows) {

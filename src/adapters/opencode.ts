@@ -78,8 +78,7 @@ async function openOpencodeDb(): Promise<SqliteDatabase | null> {
 
   try {
     const BetterSqlite3 = await import("better-sqlite3");
-    const Ctor = (BetterSqlite3.default ??
-      BetterSqlite3) as unknown as SqliteDatabaseConstructor;
+    const Ctor = (BetterSqlite3.default ?? BetterSqlite3) as unknown as SqliteDatabaseConstructor;
     return new Ctor(dbPath, { readonly: true });
   } catch {
     try {
@@ -95,10 +94,7 @@ async function openOpencodeDb(): Promise<SqliteDatabase | null> {
   }
 }
 
-function* queryUserMessages(
-  db: SqliteDatabase,
-  options?: AdapterOptions,
-): Generator<Message> {
+function* queryUserMessages(db: SqliteDatabase, options?: AdapterOptions): Generator<Message> {
   // Query: join message + part, filter to user role and text parts
   let query = `
     SELECT
@@ -139,10 +135,7 @@ function* queryUserMessages(
 }
 
 /** OpenCode assistant messages store provider/model, billed cost, and token usage in message.data. */
-function* queryUsageRecords(
-  db: SqliteDatabase,
-  options?: AdapterOptions,
-): Generator<UsageRecord> {
+function* queryUsageRecords(db: SqliteDatabase, options?: AdapterOptions): Generator<UsageRecord> {
   let where = `WHERE json_type(data, '$.tokens') = 'object'`;
   const params: unknown[] = [];
 

@@ -1367,7 +1367,7 @@ function mergeModelSummary(
   incoming: CostModelSummary,
 ): void {
   const key = incoming.model;
-  let model = models.get(key);
+  const model = models.get(key);
 
   if (!model) {
     models.set(key, { ...incoming });

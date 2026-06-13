@@ -61,9 +61,7 @@ export function cursorAdapter(): Adapter {
   };
 }
 
-async function* walkAgentTranscriptStores(
-  options?: AdapterOptions,
-): AsyncGenerator<Message> {
+async function* walkAgentTranscriptStores(options?: AdapterOptions): AsyncGenerator<Message> {
   if (!existsSync(CURSOR_PROJECTS_DIR)) {
     return;
   }
@@ -85,11 +83,7 @@ async function* walkAgentTranscriptStores(
       continue;
     }
 
-    const transcriptsDir = join(
-      CURSOR_PROJECTS_DIR,
-      projectDir,
-      "agent-transcripts",
-    );
+    const transcriptsDir = join(CURSOR_PROJECTS_DIR, projectDir, "agent-transcripts");
     if (!existsSync(transcriptsDir)) {
       continue;
     }
@@ -134,8 +128,7 @@ async function* walkTranscripts(
       continue;
     }
 
-    const session = [...(context.pathParts ?? []), entry.replace(".jsonl", "")]
-      .join("/");
+    const session = [...(context.pathParts ?? []), entry.replace(".jsonl", "")].join("/");
     yield* parseCursorJsonl(fullPath, {
       session,
       project: context.project,
@@ -360,8 +353,7 @@ async function* parseCursorUsageStore(
 async function openCursorDb(dbPath: string): Promise<SqliteDatabase | null> {
   try {
     const BetterSqlite3 = await import("better-sqlite3");
-    const Ctor = (BetterSqlite3.default ??
-      BetterSqlite3) as unknown as SqliteDatabaseConstructor;
+    const Ctor = (BetterSqlite3.default ?? BetterSqlite3) as unknown as SqliteDatabaseConstructor;
     return new Ctor(dbPath, { readonly: true });
   } catch {
     try {
